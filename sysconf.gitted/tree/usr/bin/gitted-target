@@ -1,0 +1,702 @@
+#!/bin/bash
+#
+# gitted-target: manage a target Gitted through sysconf-target -- http://gitted.io
+#
+# Gitted is a shell framework that turn a UNIX system into a Git repository
+# where the machine state is seen as a "Git work data" which can be
+# checked out/commited from/to Git branches (the "state" branches).
+#
+# This command is the client who talks to the gitted server command
+# through sysconf-target. The client provides 3 functionalities:
+#
+#   - send Gitted commands to a target system (commit, reset, status)
+#   - forward Git push/pull to target (using the Git ext:: remote protocol)
+#   - integrate both for easy use from the "git" command (init, register)
+#
+# Add -h or --help to any command for detailed information. Run command
+# 'help <target> <command> -h' to get full usage from given target's Gitted.
+#
+## HISTORY
+#    20140818 first version by JF Gigand <jf@geonef.fr>
+#    20150222 reconception around "state commit" and partial rewrite using new sysconf-target
+##
+
+nef_command_name=gitted-target
+nef_command_prefix=script_command
+
+# Source 'shell-command' from sysconf.base and find sysconf-target
+script_dir=$(dirname $(readlink -f $0))
+PATH=$script_dir:$script_dir/../share/nef-common:$script_dir/../../../../sysconf.base/tree/usr/share/nef-common:/usr/share/nef-common . shell-command
+if [ $? -ne 0 ]; then
+    echo "FATAL ERROR: could not find share/nef-common/shell-command" >&2
+    echo "HINT: keep gitted-target within its sysconf/sysconf.gitted tree (along with sysconf.base)" >&2
+    echo "      (symlinking works; sysconf being installed in /usr also works)" >&2
+    exit 2
+fi
+sysconf_target_script=$(PATH=$script_dir:$script_dir/../../../../sysconf.base/tree/usr/bin:$PATH which sysconf-target)
+
+######################################################################
+# DEFAULTS
+
+
+######################################################################
+# COMMANDS: GITTED SERVER
+
+# command: status [<target>] [<state branches>] [--quiet | --branches | --list | --diff]
+#
+# Show status of <state branches> inside target.
+# If not provided, <target> is guessed from the curent branch's upstream remote.
+##
+script_command_status() {
+    local _argv=()
+
+    while [ -n "$1" ]; do
+        case "$1" in
+            -h|--help) script_command_help status; return ;;
+            -*) script_eval_common_option "$1" --try || _argv=("${_argv[@]}" "$1"); shift ;;
+            *) _argv=("${_argv[@]}" "$1"); shift ;;
+        esac
+    done
+
+    script_server_command status "${_argv[@]}"
+}
+
+
+# command: commit [<target>]  <state branches>  [-m <message>]
+#
+# Commit current state of <state branches> inside target.
+# If not provided, <target> is guessed from the curent branch's upstream remote.
+##
+script_command_commit() {
+    local _author=
+    local _argv=()
+
+    while [ -n "$1" ]; do
+        case "$1" in
+            --author) _author="$2"; shift ;;
+            -h|--help) script_command_help commit; return ;;
+            -*) script_eval_common_option "$1" --try || _argv=("${_argv[@]}" "$1"); shift ;;
+            *) _argv=("${_argv[@]}" "$1"); shift ;;
+        esac
+    done
+
+    local _target=
+    if script_is_target_id "${_argv[0]}"; then
+        _target="${_argv[0]}"
+        unset _argv[0]
+    fi
+
+    if [ -z "$_author" ]; then
+        _author=$(git config user.name)
+        local _email=$(git config user.email)
+        if [ -n "$_email" ]; then
+            _author="$_author <${_email}>"
+        fi
+    fi
+    if [ -n "$_author" ]; then
+        _argv=(--author "$_author" "${_argv[@]}")
+    fi
+
+    script_server_command commit $_target "${_argv[@]}"
+}
+
+# command: reset [<target>]  <state branches>  [--to <commit>] [<mode>]
+#
+# Reset current state of <state branches> inside target.
+# If not provided, <target> is guessed from the curent branch's upstream remote.
+##
+script_command_reset() {
+    local _argv=()
+
+    while [ -n "$1" ]; do
+        case "$1" in
+            -h|--help) script_command_help reset; return ;;
+            -*) script_eval_common_option "$1" --try || _argv=("${_argv[@]}" "$1"); shift ;;
+            *) _argv=("${_argv[@]}" "$1"); shift ;;
+        esac
+    done
+
+    script_server_command reset "${_argv[@]}"
+}
+
+
+######################################################################
+# COMMANDS: GIT INTEGRATION
+
+# command: init <target> [ -- <sysconf-target-options>]
+#
+# Helper command to get started with a running Gitted machine
+#
+# Calling this command will:
+#   - Register gitted-target on the local repo and setup the "ted" git alias
+#   - Create the <target> machine/remote (if needed)
+#   - Copy this local sysconf branch to it
+#   - Register/check a Git remote on the local repo to control <target> easily
+#
+# The Git remote that is created is name after <target>, having stripped off
+# its 'DRIVER:' prefix.
+#
+# Example: target 'lxc:machine42' makes a Git remote 'machine42'.
+#
+# <sysconf-target-options> are options, as multiple arguments, that are passed
+# to the 'sysconf-target init' command.
+#
+##
+script_command_init() {
+    local _argv=()
+    local _target_init_opts=()
+
+    while [ -n "$1" ]; do
+        case "$1" in
+            -h|--help) script_command_help init; return ;;
+            --) shift; _target_init_opts=("$@"); shift $# ;;
+            -*) script_eval_common_option "$1" --try || _argv=("${_argv[@]}" "$1"); shift ;;
+            *) _argv=("${_argv[@]}" "$1"); shift ;;
+        esac
+    done
+
+    [ "${#_argv[@]}" -lt 1 ] && nef_fatal_usage_command init "too few arguments"
+    [ "${#_argv[@]}" -gt 1 ] && nef_fatal_usage_command init "too many arguments"
+    local _target="${_argv[0]}"
+
+    _fail() {
+        nef_fatal "command failed with status $?: $1"
+    }
+
+    script_command_register --local || _fail "$nef_command_name register --local"
+
+    nef_log "Creating target (options: ${_target_init_opts[@]}): $_target"
+
+    "$sysconf_target_script" init $_target "${_target_init_opts[@]}" \
+        || _fail "sysconf-target init $_target"
+
+    script_add_target_remote "$_target"
+}
+
+# command: register [what] [git-config-scope] [<target>]
+#
+# Copy gitted-target to a stable location and configure Git for easy use
+#
+# Optionally, add <target> as a Git remote.
+#
+# To ensure gitted-target availability within the scope specified by
+# [git-config-scope], the script is copied to the appropriate location,
+# such as: .git, ~/bin, /usr/bin or another dir as given by --script-dir.
+#
+# Then, git-config(1) is used to set the "ted" alias and "gitted:" URL scheme.
+#
+# [what] designates what is setup. If not given, all things are setup. These are:
+#
+#       --alias         Configures alias.ted to !(...)/gitted-target
+#       --url           Configures "gitted:" URL rewriting to "ext::(...)gitted-target(...)"
+#
+# [git-config-scope] designates where the config is written, as given to git-config(1):
+#
+#       --local         gitted-target is copied by default to .git
+#                       Config is written to the repository .git/config file.
+#                       This is the default behavior.
+#
+#       --global        gitted-target is copied by default to ~/bin
+#                       Config is written to system-wide $(prefix)/etc/gitconfig
+#                       rather than the repository .git/config.
+#
+#       --system        gitted-target is copied by default to /usr/bin
+#                       Write to global ~/.gitconfig file rather than the
+#                       repository .git/config.
+#
+#       --file config-file, -f config-file
+#                       Use the given config file instead of the one specified
+#                       by GIT_CONFIG
+#
+# Available options:
+#
+#   --symbolic-link             Make symbolic links instead of copying
+#   --no-copy                   Do not copy the script, use the current location instead
+#                               (even if not appropriate)
+#   --script-dir <dir>          Path to directory where gitted-target is copied
+#   --force                     Overwrite existing copy of gitted-target
+#   --alias-name <name>         Name of command alias to gitted-target (see --alias)
+#   --url-scheme <scheme>       Register a URL scheme other than default "gitted" (see --url)
+##
+script_command_register() {
+    local _argv=()
+    local _config=local
+    local _config_file=
+    local _no_copy=no
+    local _force=no
+    local _script_dir=
+    local _enable_all=yes
+    local _enable_alias=no
+    local _enable_url=no
+    local _alias_name=ted
+    local _url_scheme=gitted
+    local _cp_opts=
+
+    while [ -n "$1" ]; do
+        case "$1" in
+            --local) _config=local; shift ;;
+            --system) _config=system; shift ;;
+            --global) _config=global; shift ;;
+            -f|--file) _config=file; _config_file="$2"; shift 2 ;;
+
+            --no-copy) _no_copy=yes; shift ;;
+            --symbolic-link) _cp_opts="$_cp_opts -f -s"; shift ;;
+            --script-dir) _script_dir="$2"; shift 2 ;;
+            --force) _force=yes; shift ;;
+
+            --alias) _enable_alias=yes; _enable_all=no; shift ;;
+            --url) _enable_url=yes; _enable_all=no; shift ;;
+            --alias-name) _alias_name="$2"; shift 2 ;;
+            --url-scheme) _url_scheme="$2"; shift 2 ;;
+
+            -h|--help) script_command_help register; return ;;
+            -*) script_eval_common_option "$1"; shift ;;
+            *) _argv=("${_argv[@]}" "$1"); shift ;;
+        esac
+    done
+
+    [ "${#_argv[@]}" -gt 1 ] && nef_fatal_usage_command register "too many arguments"
+    local _target="${_argv[0]}"
+
+    # Copy the script
+    if [ $_no_copy = yes ]; then
+        [ -n "$_script_dir" ] \
+            && nef_fatal "--script-dir is not compatible with --no-copy"
+    elif [ -z "$_script_dir" ]; then
+        case $_config in
+            local) _script_dir=$(git rev-parse --git-dir)
+                   [ -d $_script_dir ] || nef_fatal "not in a Git repository
+
+HINT: change to a Git directory or use --system, --global, --file or --no-copy" ;;
+
+            global) _script_dir=~/bin ;;
+            system) _script_dir=/usr/bin ;;
+            file) nef_fatal "--file requires --script-dir or --no-copy" ;;
+        esac
+    fi
+    local _source_script=$(readlink -f $0)
+    mkdir -p "$_script_dir" || nef_fatal "could not mkdir directory: $_script_dir"
+
+    if [ -r $_script_dir/$nef_command_name ]; then
+
+        diff -q $_script_dir/$nef_command_name $_source_script >/dev/null
+        if [ $? -ne 0 ]; then
+            if [ $_force = no ]; then
+                if [ $nef_opt_show_verbose = yes ]; then
+                    nef_log "Differences that would be applied with --force:"
+                    diff -U1 $_script_dir/$nef_command_name $_source_script >&2
+                else
+                    local _diff_hint="
+      (run with --verbose (or -v) to get a diff)"
+                fi
+                nef_fatal "Script exists already with different content in: $_script_dir
+
+HINT: give --force to overwrite, specify --file or run the right $nef_command_name.$_diff_hint"
+            else
+                nef_log "Forcing overwrite with new content on target: $_script_dir/$nef_command_name"
+            fi
+        fi
+    fi
+    nef_log "Copy '$_source_script' to $_script_dir ..."
+    cp $_cp_opts $_source_script $_script_dir/
+    cp $_cp_opts "$sysconf_target_script" $_script_dir
+    cp $_cp_opts "$lib_shell_command_path" $_script_dir
+
+    # Setup Git config
+    _git_config_cmd() {
+        nef_log "Running: git config --$_config $_config_file $@"
+        git config "--$_config" $_config_file "$@" \
+            || nef_fatal "git-config(1) failed with status: $?"
+    }
+
+    if [ $_enable_alias = yes -o $_enable_all = yes ]; then
+        local _dir_spec=$_script_dir
+        [ $_config = local ] && _dir_spec='$(git rev-parse --git-dir)'
+        _git_config_cmd "alias.${_alias_name}" "!${_dir_spec}/${nef_command_name}"
+    fi
+
+    if [ $_enable_url = yes -o $_enable_all = yes ]; then
+        local _dir_spec=$_script_dir
+        if [ $_config = local ]; then
+            cd $(git rev-parse --show-toplevel)
+            local _dir_spec=$(git rev-parse --git-dir)
+        fi
+        _git_config_cmd "url.ext::${_dir_spec}/gitted-target %S .insteadOf" "${_url_scheme}:"
+    fi
+
+    if [ -n "$_target" ]; then
+        script_add_target_remote "$_target"
+    fi
+}
+
+# command: sync <remote>
+#
+# Synchronise all
+#
+# - gitted commit <target> '**'         (<target> is got from 'git config --get remote.<remote>.url')
+# - git fetch <remote>
+# - foreach <branch> in <fetched branches>:
+#     - git checkout <branch>
+#     - git merge <remote>/<branch>
+#     - git nef-subtree split <branch>
+#
+# - git nef-subtree fetch
+# - git nef-subtree merge
+# - git push <remote> <fetched branches>
+#
+# TODO usage: sync [<branch> ...]
+#
+# Options:
+#
+#   --no-fetch          Skip "gitted commit" and git-fetch from target
+#   --no-push           Skip git-push to target
+#   --no-subtree        Skip processing subtrees
+#
+script_command_sync() {
+    local _no_fetch=no
+    local _no_push=no
+    local _no_subtree=no
+    local _argv=()
+
+    while [ -n "$1" ]; do
+        case "$1" in
+            --no-fetch) _no_fetch=yes; shift ;;
+            --no-push) _no_push=yes; shift ;;
+            --no-subtree) _no_subtree=yes; shift ;;
+            -h|--help) script_command_help sync; return ;;
+            -*) script_eval_common_option "$1"; shift ;;
+            *) _argv=("${_argv[@]}" "$1"); shift ;;
+        esac
+    done
+
+    [ "${#_argv[@]}" -lt 1 ] && nef_fatal_usage_command sync "too few arguments"
+    [ "${#_argv[@]}" -gt 1 ] && nef_fatal_usage_command sync "too many arguments"
+
+
+    local _remote="${_argv[0]}"
+    local _target=$(script_git_remote_to_gitted_target "$_remote")
+    nef_log "Working on remote \"$_remote\", target \"$_target\""
+    [ -n "$_target" ] || nef_fatal "remote \"$_remote\" is missing or is not a gitted remote"
+
+    if [ no = $_no_fetch ]; then
+        (script_command_commit "$_target" '**') \
+            || nef_fatal "gitted-commit failed with status $?"
+        nef_log "Fetching all branches from remote: $_remote"
+        git fetch -v "$_remote" \
+            || nef_fatal "git-fetch failed with status $?"
+    fi
+    local remote_prefix=refs/remotes/$_remote
+    local branches=$(git show-ref \
+                            | grep " $remote_prefix/" \
+                            | sed -r "s,[0-9a-z]+ $remote_prefix/(.*)$,\1,")
+
+    nef_log -v "Branches: $branches"
+    for branch in $branches; do
+        nef_log "** branch: $branch"
+        git checkout --quiet $branch
+        git merge $remote_prefix/$branch \
+            || nef_fatal "merge conflict :("
+        if [ no = $_no_subtree ]; then
+            git nef-subtree split $branch \
+                || nef_fatal "subtree-split failed with status $?"
+        fi
+    done
+
+    if [ no = $_no_subtree ]; then
+        git nef-subtree fetch \
+            || nef_fatal "subtree-fetch failed with status $?"
+        git nef-subtree merge \
+            || nef_fatal "subtree-merge failed with status $?"
+        git nef-subtree join \
+            || nef_fatal "subtree-join failed with status $?"
+        git nef-subtree push \
+            || nef_fatal "subtree-push failed with status $?"
+    fi
+
+    if [ no = $_no_push ]; then
+        nef_log "Push all branches to remote: $_remote"
+        git push -v "$_remote" $branches \
+            || nef_fatal "git-fetch failed with status $?"
+    fi
+}
+
+# command: git-upload-pack <target>
+#
+# Forward Git protocol to target's "gitted git-receive-pack".
+#
+# This is not meant to be used directly, but through Git remote commands
+# such as git-fetch(1).
+#
+# Usage examples:
+#   git fetch "ext::/path/to/gitted-target %S lxc:container" sysconf
+#   git fetch "ext::/path/to/gitted-target %S ssh:user@host" mysql
+#
+# After running "gitted-target register", you may use the "gitted:" scheme:
+#   git fetch gitted:lxc:container sysconf
+#   git fetch gitted:ssh:user@host mysql
+#
+# Or define it as a remote:
+#   git remote add mylxc gitted:lxc:container42
+#   git fetch mylxc sysconf
+#   git checkout -b sysconf
+##
+script_command_git-upload-pack() {
+    local _argv=()
+
+    while [ -n "$1" ]; do
+        case "$1" in
+            -h|--help) script_command_help git-upload-pack; return ;;
+            -*) script_eval_common_option "$1"; shift ;;
+            *) _argv=("${_argv[@]}" "$1"); shift ;;
+        esac
+    done
+
+    [ "${#_argv[@]}" -lt 1 ] && nef_fatal_usage_command git-upload-pack "missing argument(s)"
+    [ "${#_argv[@]}" -gt 1 ] && nef_fatal_usage_command git-upload-pack "too many arguments"
+
+    local _target="${_argv[0]}"
+
+    script_target_exec "$_target" gitted git-upload-pack
+}
+
+# command: git-receive-pack <target>
+#
+# Forward Git protocol to target's "gitted git-receive-pack".
+#
+# This is not meant to be used directly, but through Git remote commands such as
+# git-push(1).
+#
+# Usage examples:
+#   git push "ext::/path/to/gitted-target %S lxc:container" sysconf
+#   git push "ext::/path/to/gitted-target %S ssh:user@host" mysql_bak:mysql
+#
+# After running "gitted-target register", you may use the "gitted:" scheme:
+#   git push gitted:lxc:container42 mysql
+#   git push gitted:ssh:user@host.net mysql_bak:mysql
+#
+# Or define it as a remote:
+#   git remote add mylxc gitted:lxc:container42
+#   git push mylxc sysconf
+##
+script_command_git-receive-pack() {
+    local _argv=()
+
+    while [ -n "$1" ]; do
+        case "$1" in
+            -h|--help) script_command_help git-receive-pack; return ;;
+            -*) script_eval_common_option "$1"; shift ;;
+            *) _argv=("${_argv[@]}" "$1"); shift ;;
+        esac
+    done
+
+    [ "${#_argv[@]}" -lt 1 ] && nef_fatal_usage_command git-receive-pack "missing argument(s)"
+    [ "${#_argv[@]}" -gt 1 ] && nef_fatal_usage_command git-receive-pack "too many arguments"
+
+    local _target="${_argv[0]}"
+    local _opts=()
+    [ -n "$GITTED_PUSH" ] && _opts=(--push-mode "$GITTED_PUSH")
+
+    script_target_exec "$_target" gitted git-receive-pack "${_opts[@]}"
+}
+
+
+######################################################################
+# COMMANDS: OTHER
+
+# command: help [<target>] [command]
+#
+# Print information about command usage.
+#
+# With no argument, a list of commands is printed.
+#
+# If <target> is provided, the "help" command is forwarded instead to the target
+# gitted server command with the remaining arguments.
+#
+##
+script_command_help() {
+    # local truy
+    local _server=no
+    local _argv=()
+    local _command=
+
+    while [ -n "$1" ]; do
+        case "$1" in
+            --server) _server=yes; shift; break ;;
+            -h|--help) script_command_help help; return ;;
+            -*) script_eval_common_option "$1"; shift ;;
+            *)
+                local _arg="$1"
+                shift
+                if script_is_target_id $_arg; then
+                    script_target_exec "$_arg" gitted help "$@"
+                    return
+                else
+                    _command="$_arg"
+                    break
+                fi
+                ;;
+        esac
+    done
+
+    nef_show_help $_command
+
+    case "$_command" in
+        status|commit|reset)
+            cat <<EOF
+
+This is a SERVER COMMAND whose arguments are forward to the server "gitted" command.
+
+For the full help from the server, run: $nef_command_name help <target> $_command
+EOF
+            # script_server_command
+            ;;
+    esac
+}
+
+######################################################################
+# FUNCTIONALITY
+
+script_is_target_id() {
+    # TODO: work with Git remote name (expand remote name to target name)
+    [[ "$1" =~ : ]] #&& return 0
+    # git remote | grep -q "^$1$"
+}
+
+script_git_remote_to_gitted_target() {
+    git config --get "remote.$1.url" \
+        | sed -r 's,^ext::[^ ]+/gitted-target +%S +,,' \
+        | sed -r 's,^gitted:,,'
+}
+# Register target as a Git remote and make a git-fetch(1) on it
+script_add_target_remote() {
+    local _target="$1"
+    local _name=$(echo $_target | cut -d: -f2)
+    nef_log "Adding and fetching git remote: $_name -> gitted:$_target"
+    git config "remote.${_name}.url" >/dev/null \
+        || git remote add "$_name" "gitted:$_target"
+    [ $? -eq 0 ] || nef_log "WARNING: failed to add git remote '$_name': gitted:$_target"
+    git fetch "$_name"
+}
+
+script_target_exec() {
+    local _target="$1"
+    shift
+
+    nef_log -v "Attaching to sysconf-target '$_target': $@"
+
+    # PATH=$script_dir:$script_dir/../../../../sysconf.base/tree/usr/bin:$PATH \
+    #     exec sysconf-target attach $_target -- "$@"
+
+    exec "$sysconf_target_script" attach $_target -- "$@"
+
+    nef_fatal "sysconf-target failed with status: $?"
+}
+
+script_server_command() {
+    local _command="$1"; shift
+    local _target=
+
+    . "$(git --exec-path)/git-parse-remote"
+
+    # [ -z "$1" ] \
+    #     && nef_fatal_usage_command "$_command" "missing target argument"
+
+    if script_is_target_id "$1"; then
+        _target="$1"
+        shift
+    else
+        . "$(git --exec-path)/git-parse-remote"
+        local _remote=$(get_default_remote)
+        # echo remote: $_remote
+        _target=$(git config remote.${_remote}.url)
+        if [ -z "$_target" ]; then
+            (nef_fatal_usage_command "$_command"  \
+                                     "Please specify the gitted target, as current branch has no upstream: $(git symbolic-ref -q HEAD)")
+            # echo >&2
+
+            (error_on_missing_default_upstream ted "run 'gitted $_command'" "on" >&2)
+
+            # echo gggg >&2
+	    branch_name=$(git symbolic-ref -q HEAD)
+	    # If there's only one remote, use that in the suggestion
+	    remote="<remote>"
+	    if test $(git remote | wc -l) = 1
+	    then
+		remote=$(git remote)
+	    fi
+
+            echo "
+
+In most case the local and remote branches are named the same,
+so you probably want to do:
+
+    git branch --set-upstream-to=$remote/${branch_name#refs/heads/} ${branch_name#refs/heads/}" >&2
+            exit 1
+        fi
+        _target="${_target#gitted:}"
+        nef_log "using target: $_target"
+        # [ -z "$_url" ] && nef_fatal_usage_command "$_command" "not a target ref: $1"
+
+        # # target must be resolved
+        # local _url=$(git config --get "remote.$_remote.remote")
+        # # nef_fatal_usage_command "$1" "$(error_on_missing_default_upstream)"
+    fi
+    script_target_exec "$_target" gitted "$_command" "$@"
+}
+
+
+######################################################################
+# COMMAND LINE & RUN
+
+# common options:
+#   -v, --verbose               Enable verbose logging on stderr
+#   -vv, --debug-verbose        Enable debug-level verbosity (implies -v)
+#   -h, --help                  Show help for main usage or specific command
+##
+script_eval_common_option() {
+    case "$1" in
+        -v | --verbose) nef_opt_show_verbose=yes; shift ;;
+        -vv | --debug-verbose) nef_opt_show_verbose=yes; nef_opt_show_debug=yes; shift ;;
+        -h | --help) nef_show_usage; exit 0 ;;
+        -*) [ "$2" != "--try" ] && nef_fatal "bad option: $1, use -h for usage information" ;;
+    esac
+}
+
+script_parse_cmdline() {
+    nef_command_merge_env
+    nef_command_init_options
+
+    script_command_argv=()
+
+    while [ -n "$1" ]; do
+
+        case "$1" in
+            -*) script_eval_common_option "$1"; shift ;;
+            *) script_command_argv=("$@"); break ;;
+        esac
+
+    done
+
+    [ -z "${script_command_argv[0]}" ] && script_command_argv=(help)
+
+    # Seek .git directory
+    script_git_dir=$(git rev-parse --git-dir)
+    echo "$script_git_dir" | grep -q / || {
+        script_git_dir=$PWD/$script_git_dir
+    }
+    [ -z "$script_git_dir" ] && nef_fatal "not in GIT directory or working tree"
+
+    # Run command
+    script_command_name="${script_command_argv[0]}"
+    unset script_command_argv[0]
+    script_command_function_name="${nef_command_prefix}_${script_command_name}"
+    declare -f $script_command_function_name >/dev/null \
+        || nef_fatal_usage "invalid command: $script_command_name"
+    $script_command_function_name "${script_command_argv[@]}" \
+        || nef_fatal "command ${script_command_name} failed with status $?"
+    nef_log -v "Command returned successfully."
+}
+
+######################################################################
+
+script_parse_cmdline "$@"

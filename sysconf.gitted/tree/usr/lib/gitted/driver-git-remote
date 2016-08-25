@@ -1,0 +1,496 @@
+#!/bin/bash
+#
+# Gitted state driver to sync a remote Git repository
+#
+# If the remote URL is a local directory, the driver will check if it is a
+# non-bare repository (that is, with an index and working tree).
+# If so, the status/commit/reset commands also work with the local changes,
+# whether in index only (as reported by status --cached) and working dir.
+#
+# CONFIGURATION EXAMPLE: /etc/gitted/state/sysconf.config
+#
+# This example will enable gitted to sync commit/reset with the local /sysconf
+# directory. Only the branches are manipulated, not tags or other refs, as
+# git-remote.remoteRefs equals "refs/heads/*", which means: all branches and
+# below.
+#
+#   [state]
+#      driver = git-remote
+#
+#   [git-remote]
+#      url = /sysconf
+#      remoteRefs = refs/heads/*
+#      localRefs = *
+#
+
+. /usr/share/gitted/shell-driver || exit 2
+
+# Defaults:
+driver_url="${GITTED_CONFIG_GIT_REMOTE_URL}"
+driver_remoterefs="${GITTED_CONFIG_GIT_REMOTE_REMOTEREFS:-refs/*}"
+driver_localrefs="${GITTED_CONFIG_GIT_REMOTE_LOCALREFS:-*}"
+driver_pretty="--pretty=format:[%h] %ar, by %cn -- %s"
+driver_auto_hook="${GITTED_CONFIG_GIT_REMOTE_REMOTEREFS:-refs/*}"
+
+################################################################################
+# Driver / shell-driver interface
+
+gitted_driver_list() {
+    git ls-remote "$driver_url" "$driver_remoterefs" \
+        | while read _uuid _ref; do
+
+              # echo REF: $_ref >&2
+              local _rewritten=$(echo $_ref | driver_rewrite "$driver_remoterefs" "$driver_localrefs")
+              echo $_rewritten
+              # echo REW: $_rewritten >&2
+          done
+}
+
+gitted_driver_status_code() {
+    local _always_check_remote=no
+    while [ -n "$1" ]; do
+        case "$1" in
+            --always-check-remote) _always_check_remote=yes; shift ;;
+            --) shift; break ;;
+            -*) nef_log "invalid option to .._status_code(): $1"; shift ;;
+            *) break ;;
+        esac
+    done
+
+    driver_remote_branch=$(echo $GITTED_CONFIG_STATE_BRANCH \
+                                  | driver_rewrite "$driver_localrefs" "$driver_remoterefs")
+    # nef_log -v "Checking remote URL '$driver_url' for ref: $driver_remote_branch"
+    local _out=($(git ls-remote "$driver_url" $driver_remote_branch))
+
+    [ ${#_out[@]} -gt 2 ] && nef_fatal "gt-ls-remote has returned more than one ref: ${_out[@]}"
+    driver_remote_commit=${_out[0]}
+
+    if [ -z "$driver_remote_commit" ]; then
+        nef_log "ref not found on remote: $driver_remote_branch"
+        [ $GITTED_CONFIG_STATE_COMMIT = $GITTED_NULL_SHA1 ] && return
+        return 7 # 7=deletion
+    fi
+
+    # nef_log -v "remote ref '$driver_remote_branch' has value: $driver_remote_commit"
+
+    [ $GITTED_CONFIG_STATE_COMMIT = $GITTED_NULL_SHA1 ] && return 6      # 6=addition
+
+    if [ $driver_remote_commit = $GITTED_CONFIG_STATE_COMMIT \
+                               -o $_always_check_remote = yes ]; then
+
+        gitted_driver_check_remote
+        if [ "$remote_head" = $driver_remote_branch ]; then
+            driver_local_changes=$(remote_local_git status --porcelain --untracked-files=all)
+            [ -n "$driver_local_changes" ] && return 5
+        fi
+    fi
+    [ $driver_remote_commit != $GITTED_CONFIG_STATE_COMMIT ] && return 5 # 5=modifications
+
+    # [ $_always_check_remote = no ] && gitted_driver_check_remote
+    # if [ "$remote_head" = $driver_remote_branch ]; then
+    #     driver_local_changes=$(remote_local_git status --porcelain --untracked-files=all)
+    #     [ -n "$driver_local_changes" ] && return 5
+    # fi
+
+    return 0 # 0=clean
+
+    # [ $driver_remote_commit = $GITTED_CONFIG_STATE_COMMIT ] && return
+    # return 5 # 5=modification
+}
+
+gitted_driver_status_list() {
+    gitted_driver_status_code --always-check-remote
+    local _status=$?
+    local _log=
+    local _no_work_tree=no
+
+    while [ -n "$1" ]; do
+        case "$1" in
+            --no-work-tree) _no_work_tree=yes; shift ;;
+            --) shift; break ;;
+            -*) nef_log "invalid option to .._status_code(): $1"; shift ;;
+            *) break ;;
+        esac
+    done
+
+    status_local_has_new=0
+    status_remote_has_new=0
+
+    case $_status in
+
+        0) # clean
+            if [ -n "$driver_remote_commit" ]; then
+                _log=$(driver_git_log1)
+                echo "UNCHANGED branch '$driver_remote_branch' on remote: $driver_url"
+                # echo "Commit is: $_log"
+            else
+                echo "The Gitted branch does not exist, nor does the remote branch."
+            fi
+            ;;
+        5) # changes
+            driver_git_fetch_remote_ref
+            echo "Remote branch '$driver_remote_branch': $driver_remote_commit_label"
+            local _local_commits
+            local _remote_commits
+            _local_commits=$(git log --exit-code "${driver_pretty/:/:  }" $GITTED_CONFIG_STATE_COMMIT ^$driver_remote_commit)
+            status_local_has_new=$?  # 1 if yes
+            _remote_commits=$(git log --exit-code "${driver_pretty/:/:  }" ^$GITTED_CONFIG_STATE_COMMIT $driver_remote_commit)
+            status_remote_has_new=$?  # 1 if yes
+
+            case $status_local_has_new,$status_remote_has_new in
+                1,1)
+                    echo "The remote branch '$driver_remote_branch' and the local Gitted branch has DIVERGED."
+                    echo
+                    echo "LOCAL NEW COMMITS in Gitted:"
+                    echo "$_local_commits"
+                    echo
+                    echo "REMOTE NEW COMMITS in ${driver_remote_branch}:"
+                    echo "$_remote_commits"
+                    ;;
+                1,0)
+                    echo "The remote branch '$driver_remote_branch' is BEHIND the local Gitted branch."
+                    echo
+                    echo "LOCAL NEW COMMITS in Gitted:"
+                    echo "$_local_commits"
+                    ;;
+                0,1)
+                    echo "The remote branch '$driver_remote_branch' has NEW COMMITS over the local Gitted branch."
+                    echo
+                    echo "REMOTE NEW COMMITS in ${driver_remote_branch}:"
+                    echo "$_remote_commits"
+                    ;;
+                0,0)
+                    echo
+                    # echo "Weird, this should not happen (status is MODIFIED but no difference in commit history)"
+                    echo "UNCHANGED branch ${driver_remote_branch} but local modifications"
+                    ;;
+            esac
+
+            if [ $_no_work_tree = no ]; then
+                if [ "$remote_head" = $driver_remote_branch ]; then
+                    echo "Local remote HEAD is at: $remote_head (our branch)"
+                else
+                    echo "Local remote HEAD is at: $remote_head"
+                fi
+
+                if [ -n "$driver_local_changes" ]; then
+
+                    # the git-add --intent-to-add is necessary to include untracked files in diffs
+                    remote_local_untracked_check && \
+                        remote_local_git add --intent-to-add "${remote_untracked[@]}"
+
+                    _out=$(remote_local_git diff --exit-code --stat --cached)
+                    if [ $? -eq 1 ]; then
+                        echo -e "\nLOCAL MODIFICATIONS in INDEX:"
+                        echo "$_out"
+                    fi
+                    _out=$(remote_local_git diff --exit-code --stat)
+                    if [ $? -eq 1 ]; then
+                        echo -e "\nLOCAL MODIFICATIONS in WORK TREE:"
+                        echo "$_out"
+                    fi
+
+                    [ ${#remote_untracked[@]} -gt 0 ] \
+                        && remote_local_git reset HEAD -- "${remote_untracked[@]}"
+
+                else
+                    echo -e "\nCLEAN STATE in index or work tree against currently checked out branch"
+                fi
+            fi
+
+            ;;
+        6) # additions
+            echo "# Remote branch '$driver_remote_branch' EXISTS with head commit: $driver_remote_commit."
+            echo "# The Gitted branch does not exist, though. Just make a commit to fetch it."
+            ;;
+        7) # deletions
+            echo "# Remote branch '$driver_remote_branch' has been DELETED."
+            echo "# The next commit on this branch will delete the Gitted branch is well, be careful!"
+            ;;
+        # *)
+        #     ;;
+    esac
+
+    return $_status
+}
+
+gitted_driver_status_diff() {
+    # gitted_driver_status_code --always-check-remote
+    gitted_driver_status_list --no-work-tree
+    local _status=$?
+    local _out=
+
+    if [ $_status -eq 5 ]; then
+
+        driver_git_fetch_remote_ref
+        # echo "Remote branch '$driver_remote_branch': $driver_remote_commit_label"
+
+        if [ $status_local_has_new,$status_remote_has_new != 0,0 ]; then
+            # changes in commit history
+
+            echo -e "\nDIFF of commits: ${driver_remote_commit}..${GITTED_CONFIG_STATE_COMMIT}:"
+            git diff $GITTED_CONFIG_STATE_COMMIT $driver_remote_commit | sed 's/^/    /g'
+        fi
+
+        if [ "$remote_head" = $driver_remote_branch -a -n "$driver_local_changes" ]; then
+
+            # the git-add --intent-to-add is necessary to include untracked files in diffs
+            local _old_ifs="$IFS"; IFS=$'\n'
+            local _untracked=($(remote_local_git ls-files --others --exclude-standard))
+            IFS="$_old_ifs"
+            remote_local_git add --intent-to-add "${_untracked[@]}"
+
+            # Local changes in index and/or work tree
+            _out=$(remote_local_git diff --exit-code --cached)
+            if [ $? -eq 1 ]; then
+                echo -e "\nDIFF of INDEX:"
+                echo "    ${_out//
+/
+    }"
+            fi
+            _out=$(remote_local_git diff --exit-code)
+            if [ $? -eq 1 ]; then
+                echo -e "\nDIFF of WORK TREE:"
+                echo "    ${_out//
+/
+    }"
+            fi
+            remote_local_git reset HEAD -- "${_untracked[@]}"
+
+        fi
+    fi
+
+    return $_status
+}
+
+gitted_driver_commit() {
+    gitted_driver_status_code --always-check-remote
+    local _status=$?
+
+    case $_status in
+        0) # clean
+            # nef_log "nothing to commit"
+            return 2
+            ;;
+        5 | 6) # changes or additions
+
+            if [ "$remote_head" = $driver_remote_branch -a -n "$driver_local_changes" ]; then
+                local _message="$GITTED_CONFIG_COMMIT_MESSAGE"
+                local _args=()
+                [ -z "$_message" ] && \
+                    _message="Gitted $nef_command_name auto-commit from $(id -un)@$(hostname):$driver_url"
+                [ -n "$GITTED_CONFIG_COMMIT_AUTHOR" ] \
+                    && _args=("${_args[@]}" --author="$GITTED_CONFIG_COMMIT_AUTHOR")
+                echo GITTED_CONFIG_COMMIT_AUTHOR "$GITTED_CONFIG_COMMIT_AUTHOR" >&2
+                remote_local_git --fatal add -A >&2
+                remote_local_git --fatal commit -m "$_message" "${_args[@]}" >&2
+            fi
+
+            driver_git_fetch || exit 1
+            driver_remote_commit=$(git rev-parse --verify FETCH_HEAD) \
+                || nef_fatal "invalid FETCH_HEAD after git-fetch"
+
+            echo $driver_remote_commit
+            ;;
+        7) # deletions
+            echo $GITTED_NULL_SHA1
+            ;;
+        *)
+            nef_log "driver_status returned unknown status $?: commit rejected"
+            return $_status
+            ;;
+    esac
+}
+
+gitted_driver_reset() {
+    gitted_driver_check_remote
+    gitted_driver_status_code
+    local _status=$?
+
+    case $GITTED_CONFIG_RESET_MODE in
+        hard)
+            # TODO: delete remote ref if $GITTED_CONFIG_RESET_COMMIT = $GITTED_NULL_SHA1 ?
+            gitted_driver_push_to_remote --ignore-changes
+            ;;
+
+        keep)
+            if [ $_status -ne 0 ]; then
+                nef_log "remote ref has changed, not resetting with --keep"
+                nef_log "HINT: call 'status --list' to get a view"
+                exit 1
+            fi
+
+            gitted_driver_push_to_remote
+            ;;
+
+        merge)
+            gitted_driver_push_to_remote
+
+            # nef_fatal "--merge mode not implemented by this driver now"
+
+            ## TODO: check fast-forward to deny merge that "take new commit out" ..?
+            #     gitted_driver_status_code
+
+            #     if [ $? -eq 0 ]; then
+            #         # fast-foward or not
+            #         git push "$driver_url" +${GITTED_CONFIG_RESET_COMMIT}:${driver_remote_branch}
+
+            #     else
+            #         driver_git_fetch_remote_ref
+            #         _str=$(git log --pretty=oneline $GITTED_CONFIG_STATE_COMMIT ^$driver_remote_commit)
+            #         if [ $? -eq 0 ]; then
+            #             # reset commit is contained in remote commit: doing nothing
+            #             nef_log ""
+            #         else
+            #             nef_log
+            #             git push "$driver_url" +${GITTED_CONFIG_RESET_COMMIT}:${driver_remote_branch}
+            #         fi
+
+            #     fi
+            ;;
+    esac
+}
+
+
+
+################################################################################
+# PRIVATE UTILS:
+
+# usage: echo "string(s)" | driver_rewrite "from" "to"
+driver_rewrite() {
+    local _from="${1//\//\\/}"
+    local _to="${2//\//\\/}"
+    # echo running: sed -r "s/^${_from/\*/(.*)}$/${_to/\*/\\1}/" >&2
+    sed -r "s/^${_from/\*/(.*)}$/${_to/\*/\\1}/"
+}
+
+driver_git_fetch() {
+    local _out
+    _out=$(git fetch "$driver_url" $driver_remote_branch 2>&1)
+    local _status=$?
+
+    if [ $_status -ne 0 ]; then
+        echo $_out >&2
+        nef_fatal "git-fetch failed with status $_status for remote: $driver_url [branch: $driver_remote_branch]"
+    fi
+
+    return 0
+}
+
+driver_git_fetch_remote_ref() {
+    driver_remote_commit_label=$(driver_git_log1)
+    if [ $? -ne 0 ]; then
+        nef_log "Fetching remote ref: $driver_remote_branch"
+        driver_git_fetch
+
+        driver_remote_commit_label=$(driver_git_log1)
+        [ $? -eq 0 ] || nef_fatal "could not get commit, even after fetching: $driver_remote_commit: $_driver_remote_commit_label"
+    fi
+}
+driver_git_log1() {
+    git log -1 "$driver_pretty" $driver_remote_commit 2>/dev/null
+    # git log -1 --pretty=oneline $driver_remote_commit 2>/dev/null
+}
+
+driver_fix_local_repo() {
+    if [ true = "$GITTED_CONFIG_GIT_REMOTE_AUTOGITTEDCOMMIT" ]; then
+        postcommit_hook_path=$driver_url/.git/hooks/post-commit
+        if [ ! -h $postcommit_hook_path ]; then
+            nef_log "Creating missing symlink: $postcommit_hook_path"
+            ln -s /usr/share/gitted/driver-git-remote/git-hook/post-commit $postcommit_hook_path
+        fi
+    fi
+}
+
+gitted_driver_push_to_remote() {
+    local _force=false
+    while [ -n "$1" ]; do
+        case "$1" in
+            --ignore-changes) _force=true; shift ;;
+            --) shift; break ;;
+            *) break ;;
+        esac
+    done
+
+    if [ "$remote_head" = $driver_remote_branch ]; then
+        nef_log "non-bare repository: detaching HEAD from currently checked out: $remote_head"
+        SYSCONF_UPDATE_ON_CHECKOUT=no remote_local_git --fatal checkout --quiet --detach
+    fi
+
+    # fast-foward or not
+    git push --quiet "$driver_url" +${GITTED_CONFIG_RESET_COMMIT}:${driver_remote_branch}
+
+    if [ "$remote_head" = $driver_remote_branch ]; then
+        nef_log "non-bare repository: checking back out branch: $driver_remote_branch"
+        # --merge can be useful for reset --merge
+
+        if [ $_force = true ]; then
+            nef_log "Cancelling changes in index and work tree..."
+            remote_local_git --fatal reset --quiet HEAD --hard
+            local work_tree_path="$(remote_local_git rev-parse --show-toplevel)"
+            remote_local_untracked_check
+            for _untracked in "${remote_untracked[@]}"; do
+                rm -f -- "$work_tree_path/$_untracked"
+            done
+        fi
+        if ! remote_local_git checkout --quiet ${driver_remote_branch#refs/heads/}; then
+            nef_log "git-checkout failed with status $?: resetting $driver_remote_branch to: $driver_remote_commit"
+            # git push --quiet "$driver_url" +${driver_remote_commit}:${driver_remote_branch}
+            remote_local_git update-ref ${driver_remote_branch} ${driver_remote_commit}
+            remote_local_git checkout --quiet ${driver_remote_branch#refs/heads/}
+            exit 1
+        fi
+
+        driver_fix_local_repo
+    fi
+}
+gitted_driver_check_remote() {
+    local _str="Remote is"
+    remote_is_local=false
+    remote_is_bare=true
+    remote_head=
+
+    if [[ "$driver_url" =~ ^/ ]] && [ -d "$driver_url" ]; then
+        remote_is_local=false
+        remote_is_bare=$(remote_local_git rev-parse --is-bare-repository)
+        _str="$_str local, bare=$remote_is_bare"
+
+        if [ "$remote_is_bare" = false ]; then
+            remote_head=$(remote_local_git symbolic-ref HEAD)
+            _str="$_str, HEAD=$remote_head"
+        fi
+    else
+        _str="$_str non-local"
+    fi
+}
+
+remote_local_git() {
+    local _fatal=false
+
+    while [ -n "$1" ]; do
+        case "$1" in
+            --fatal) _fatal=true; shift ;;
+            --) shift; break ;;
+            *) break ;;
+        esac
+    done
+
+    (unset GIT_DIR; cd $driver_url; git "$@")
+    local _status=$?
+
+    [ $_fatal = true -a $_status -ne 0 ] \
+        && nef_fatal "git-$1 failed with status $_status in local repository: $driver_url"
+
+    return $_status
+}
+
+remote_local_untracked_check() {
+    local _old_ifs="$IFS"; IFS=$'\n'
+    remote_untracked=($(remote_local_git ls-files --others --exclude-standard))
+    IFS="$_old_ifs"
+    [ "${#remote_untracked[@]}" -gt 0 ]
+}
+
+################################################################################
+
+gitted_driver_run "$@"

@@ -1,0 +1,48 @@
+#!/bin/bash
+#
+# SKELETON of a Gitted state driver
+#
+# Use it as a base to write a state driver as a bash script.
+#
+# /usr/share/gitted/shell-driver provides a common framework
+# to manage errors for actions that are not implemented.
+#
+# Please provide in this head comment a full description of what the driver
+# does, and an example of configuration for /etc/gitted/state/.
+#
+
+. /usr/share/gitted/shell-driver || exit 2
+
+################################################################################
+# Driver / shell-driver interface
+
+# Must echo a multi-line list of the names of the nested branches managed
+# by this driver.
+# Comment out if the driver is single branch.
+gitted_driver_list() {
+    return 2 # by default, reports as non-dirMode
+}
+
+gitted_driver_status_code() {
+    false
+}
+
+gitted_driver_status_list() {
+    false
+}
+
+gitted_driver_status_diff() {
+    false
+}
+
+gitted_driver_commit() {
+    false
+}
+
+gitted_driver_reset() {
+    false
+}
+
+################################################################################
+
+gitted_driver_run "$@"

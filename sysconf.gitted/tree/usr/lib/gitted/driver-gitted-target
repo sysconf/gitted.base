@@ -1,0 +1,231 @@
+#!/bin/bash
+#
+# Gitted state driver to mount a given gitted target on the local Gitted
+#
+# This drivers is simple: use gitted-target to forward status/commit/reset
+# actions to the given gitted target.
+#
+# It gets interesting when seen as a GITTED MOUNT of a gitted target on the
+# local gitted system.
+#
+# A useful feature is tthe ability to create the target automatically
+# when a TARGET/sysconf/master branch is being reset.
+# This behaviour is enabled with config item: state.target = DRIVER:[*]
+# ...where DRIVER is one of the drivers supported by sysconf-target.
+#
+# CONFIGURATION EXAMPLE: /etc/gitted/state/@.config
+#
+# This example will enable gitted to manage any LXC container through
+# gitted-target (which uses sysconf-target to create or access the container).
+#
+# Resetting branch "@/NAME/sysconf/master" will create the LXC container
+# NAME using the branch head as the /sysconf. If the container exists already,
+# it is updated only.
+#
+# Pushing other branches in "@/NAME/" will do nothing until container NAME
+# exists. Then, any commit or reset command will be forwarded just the same.
+#
+# In option "state.init-custom", the "lxc:unconfined" custom spec will enable
+# sysconf-target to create the LXC container with the "lxc.aa_profile = unconfined"
+# LXC option to allow nested containers.
+#
+# Thus, this example is actually used to manage system grapes with 2 to 4 levels,
+# for example a level-4 branch: @/cloud4/@/grappe42/@/mysql-machine/sysconf/master
+#
+#   [state]
+#      driver = gitted-target
+#      target = lxc:[*]
+#      init-custom = ssh-pubkey,git-user,lxc:unconfined
+#
+
+. /usr/share/gitted/shell-driver || exit 2
+
+# Defaults:
+
+
+################################################################################
+# Driver / shell-driver interface
+
+gitted_driver_list() {
+    # GITTED_CONFIG_TARGET_MYSUBTEST_TARGET=lxc:mysubtest
+    local _target_list=$(
+        (
+            env | grep -E ^GITTED_CONFIG_TARGET_.+_TARGET \
+                | sed -r 's/^GITTED_CONFIG_TARGET_([^=]+)_TARGET=(.*)/\L\1\E \2/'
+            sysconf-target status 'lxc:*' --state | sed -r 's/^([^:]+):([^ ]+) .*/\2 \1:\2/'
+        ) | sort | uniq
+    )
+    local _ifs="$IFS"; IFS=$'\n'
+    local _target_defs=($_target_list); IFS="$_ifs"
+    for _target_def in "${_target_defs[@]}"; do
+        local _target_def_arr=($_target_def)
+        local _name="${_target_def_arr[0]}"
+        local _target="${_target_def_arr[1]}"
+
+        # nef_log "name = $_name ; target = $_target"
+        local _state=$(sysconf-target status --state "$_target" | cut -d' ' -f2)
+        if [ $_state != missing ]; then
+            # echo "$_name"
+            # else
+            gitted-target status $_target  --branches | grep -v ^# | sed "s/^../$_name\//"
+        fi
+        #| cut -d' ' -f1
+    done
+}
+
+gitted_driver_status() {
+    driver_load_target
+
+    if [ $driver_target_state = missing ]; then
+        [ $GITTED_CONFIG_STATE_COMMIT = $GITTED_NULL_SHA1 ] && return
+        return 7 # 7=deletion
+    fi
+
+    gitted-target status "$driver_target" "$driver_target_branch" \
+        --ref $GITTED_CONFIG_STATE_COMMIT --$GITTED_CONFIG_STATUS_REPORT
+}
+
+gitted_driver_commit() {
+    driver_load_target
+
+    if [ $driver_target_state = missing ]; then
+
+        [ $GITTED_CONFIG_STATE_COMMIT = $GITTED_NULL_SHA1 ] \
+            && nef_fatal "Nothing to commit as branch is not present and target is missing: $driver_target"
+
+        if [ $GITTED_CONFIG_STATE_FORCE_COMMIT = true ]; then
+            echo $GITTED_NULL_SHA1
+        else
+            nef_fatal "Not committing branch to null without --force, as target is missing: $driver_target"
+        fi
+    fi
+
+    local _opts=()
+    [ -n "$GITTED_CONFIG_COMMIT_MESSAGE" ] && _opts=(
+        "${_opts[@]}" -m "$GITTED_CONFIG_COMMIT_MESSAGE"
+    )
+    # local _commit=
+    # _commit=$(
+    #     # stdout must go as stdout also redirected to stderr
+    #     (gitted-target commit "$driver_target" \
+    #         "$driver_target_branch" --stdout "${_opts[@]}" ) | tee >(cat)  >&2
+    #     exit ${PIPESTATUS[0]}
+    # )
+    # local _status=$?
+    # [ $_status -eq 0 ] \
+    #     || nef_fatal --status $? "gitted-target commit failed with status $? on target: $driver_target"
+    (
+        echo Running: gitted-target commit "$driver_target" "$driver_target_branch" "${_opts[@]}" >&2
+        gitted-target commit "$driver_target" "$driver_target_branch" "${_opts[@]}" 2>&1
+        _status=$?
+        [ $_status = 2 ] && exit 0
+        [ $_status -eq 0 ] \
+            || nef_fatal --status $_status "gitted-target commit failed with status $_status on target: $driver_target"
+    ) | sed "s/^/${driver_target}: /" >&2
+    [ ${PIPESTATUS[0]} -eq 0 ] #|| exit ${PIPESTATUS[0]}
+
+    git fetch "ext::gitted-target %S $driver_target" "$driver_target_branch" >&2
+    git rev-parse --verify FETCH_HEAD # print full commit ID as we are expected to
+}
+
+gitted_driver_reset() {
+    driver_load_target
+
+    if [ $GITTED_CONFIG_RESET_COMMIT = $GITTED_NULL_SHA1 ]; then
+        [ $driver_target_state = missing ] \
+            && nef_fatal "Cannot remove missing target: $driver_target"
+        nef_fatal "Removing target is not supported (state = $driver_target_state): $driver_target"
+    fi
+
+    if [ "$driver_target_branch" = sysconf/master ]; then
+        local _need_init=no
+        if [ $driver_target_state = missing ]; then
+            _need_init=yes
+        else
+            sysconf-target status --sysconf $driver_target 2>/dev/null \
+                || _need_init=yes
+        fi
+
+        if [ $_need_init = yes ]; then
+            local _init_options=()
+
+            [ -n "$GITTED_CONFIG_STATE_INIT_BACKING_STORE" ] && \
+                _init_options=(${_init_options[@]} --backing-store "$GITTED_CONFIG_STATE_INIT_BACKING_STORE")
+            [ -n "$GITTED_CONFIG_STATE_INIT_FSSIZE" ] && \
+                _init_options=(${_init_options[@]} --fssize "$GITTED_CONFIG_STATE_INIT_FSSIZE")
+
+            sysconf-target init $driver_target -v \
+                --custom ${GITTED_CONFIG_STATE_INIT_CUSTOM,-ssh-pubkey,git-user} \
+                --git-ref $GITTED_CONFIG_RESET_COMMIT $GIT_DIR \
+                ${_init_options[@]} \
+                || nef_fatal "Could not initialize target: $driver_target"
+            # TODO: manage "--custom unconfined" based on config
+        fi
+
+    else
+        if [ $driver_target_state = missing ]; then
+            nef_fatal "Target is missing, cannot be reset: $driver_target
+
+HINT: to create '$driver_target', push 'sysconf/master' to: $driver_target_name"
+        fi
+    fi
+
+    #     if [ $driver_target_state = missing ]; then
+
+    #         if [ "$driver_target_branch" = sysconf/master ]; then
+
+    #             sysconf-target init $driver_target \
+    #                 --custom ${GITTED_CONFIG_STATE_INIT_CUSTOM,-ssh-pubkey,git-user} \
+    #                 --git-ref $GITTED_CONFIG_RESET_COMMIT $GIT_DIR \
+    #                 || nef_fatal "Could not initialize target: $driver_target"
+    #             # TODO: manage "--custom unconfined" based on config
+
+    #         else
+    #             nef_fatal "Target is missing, cannot be reset: $driver_target
+
+    # HINT: to create '$driver_target', push 'sysconf/master' to: $driver_target_name"
+    #         fi
+    #     fi
+
+    if [ "$_need_init" != yes ]; then
+
+        [[ "$driver_target_branch" =~ ^@ ]] && driver_target_branch="\\$driver_target_branch"
+
+        nef_log "pushing to: ext::gitted-target %S $driver_target"
+
+        # Make the push reset on remote side
+        GITTED_PUSH=$GITTED_CONFIG_RESET_MODE \
+            git push "ext::gitted-target %S $driver_target" \
+            "+${GITTED_CONFIG_RESET_COMMIT}:refs/heads/${driver_target_branch}" >&2
+    fi
+}
+
+################################################################################
+# Utils
+
+driver_load_target() {
+    driver_target_name=$(echo $GITTED_CONFIG_STATE_BRANCH | cut -d/ -f1)
+    driver_target_branch=${GITTED_CONFIG_STATE_BRANCH:$((${#driver_target_name}+1))}
+
+    local _target_name_uc=${driver_target_name^^}
+    local _var=GITTED_CONFIG_TARGET_${_target_name_uc//-/_}_TARGET
+
+    driver_target=${!_var}
+    [ -z "$driver_target" ] && driver_target=${GITTED_CONFIG_STATE_TARGET/\[\*\]/$driver_target_name}
+
+    # nef_log "driver_target_name: $driver_target_name"
+    # nef_log "driver_target_branch: $driver_target_branch"
+    # nef_log "driver_target: $driver_target"
+
+    # Merge target-specific variables into GITTED_CONFIG_STATE
+    code=$(env | grep ^GITTED_CONFIG_TARGET_${driver_target_name^^} \
+        | sed -r "s/^GITTED_CONFIG_TARGET_${driver_target_name^^}_([^=]+)=(.*)/GITTED_CONFIG_STATE_\1=\"\2\"/" )
+    eval "$code"
+
+    driver_target_state=$(sysconf-target status --state "$driver_target" | cut -d' ' -f2)
+    # nef_log "State of target '$_target' is: $driver_target_state"
+}
+
+################################################################################
+
+gitted_driver_run "$@"

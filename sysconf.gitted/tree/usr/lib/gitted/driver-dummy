@@ -1,0 +1,16 @@
+#!/bin/bash
+#
+
+. /usr/share/gitted/shell-driver || exit 2
+
+gitted_driver_status_code() {
+
+    return ${GITTED_CONFIG_DUMMY_STATUS:-1}
+}
+
+gitted_driver_commit() {
+    return 2 # nothing to commit
+}
+
+
+gitted_driver_run "$@"

@@ -1,0 +1,129 @@
+# Framework structure for gitted (v1) drivers written in bash script  -*- shell-script -*-
+
+if [ -z "$GITTED_CONFIG_STATE_DRIVER" ]; then
+    echo "Should be runned by bin/gitted" >&2
+    exit 1
+fi
+
+. /usr/share/nef-common/shell-command || exit 2
+
+# env | grep ^GITTED_; exit 1
+# [ -z "$GITTED_CONFIG_STATE_BRANCH" ] && nef_log "WARN: driver GITTED_CONFIG_STATE_BRANCH is empty"
+[ -z "$GITTED_CONFIG_STATE_COMMIT" ] && nef_log "WARN: driver GITTED_CONFIG_STATE_BRANCH is empty"
+
+# echo GITTED_CONFIG_STATE_COMMIT: $GITTED_CONFIG_STATE_COMMIT
+
+gitted_driver_run() {
+    local _func=gitted_driver_$GITTED_CONFIG_DRIVER_ACTION
+    $_func "$@"
+}
+
+#
+# Arguments:
+#   $GITTED_CONFIG_STATUS_REPORT  quiet, branches, list or diff
+#
+gitted_driver_status() {
+    case $GITTED_CONFIG_STATUS_REPORT in
+        quiet|branches)
+            gitted_driver_status_code_canonical
+            ;;
+        list)
+            gitted_driver_status_list
+            ;;
+        diff)
+            gitted_driver_status_diff
+            ;;
+        *)
+            exit 1
+            ;;
+    esac
+}
+
+# Should return, compared to $GITTED_CONFIG_STATE_BRANCH:
+#   0 if branch is unchanged (and remain absent if $GITTED_NULL_SHA1)
+#   1 if any error occurs
+#   5 content is modified
+#   6 content was added (if supported by driver, otherwise 5)
+#   7 content was deleted (if supported by driver, otherwise 5)
+#
+# It should not report 6 or 7 if the branch *itself* is "added" or "remove".
+# If the branch does not exist, then $GITTED_CONFIG_STATE_BRANCH is
+# equal to $GITTED_NULL_SHA1. In this case, the status cannot be 5 or 7,
+# it is either 0 (still no data) or 6 (some data there).
+#
+# However, gitted_driver_status will manage converting 5 (modified)
+# to 6 (added) if state-branch is null.
+#
+gitted_driver_status_code() {
+    nef_fatal "not implemented by driver: gitted_driver_status_code"
+}
+gitted_driver_status_code_canonical() {
+    gitted_driver_status_code
+    local _status=$?
+    if [ "$GITTED_CONFIG_STATE_COMMIT" = $GITTED_NULL_SHA1 ]; then
+        [ $_status -eq 5 ] && _status=6
+        [ $_status -eq 7 ] && \
+            nef_fatal "shell-driver: state-branch is NULL and status is 'deleted' (makes no sense)"
+    fi
+    # nef_log "status driv: $_status"
+    return $_status
+}
+gitted_driver_status_list() {
+    gitted_driver_status_code_canonical
+    local _status=$?
+    case $_status in
+        0) cat <<EOF
+There are NO PENDING CHANGES for this branch, as reported by $nef_command_name.
+EOF
+            ;;
+        5) cat <<EOF
+$nef_command_name reports MODIFICATIONS on this branch.
+
+There is no list available of the details about these modifications
+impacted this branch.
+EOF
+            ;;
+        6) cat <<EOF
+$nef_command_name reports ADDITIONS on this branch.
+
+There is no list available of the details about what has been added
+but you could safely commit these changes.
+EOF
+            ;;
+        7) cat <<EOF
+$nef_command_name reports DELETIONS on this branch.
+
+There is no list available of the details about what has been deleted
+but it means the branch has no uncommitted things you can loose.
+EOF
+            ;;
+        *) cat <<EOF
+$nef_command_name reported ERROR CODE $_status
+for this branch, which means something went wrong and we cannot
+be sure about the state of this branche.
+EOF
+            ;;
+    esac
+    # echo "    A --diff view may still be provided by this driver"
+    return $_status
+}
+gitted_driver_status_diff() {
+    echo "($nef_command_name does not provide a diff, showing --list instead)"
+    echo
+    gitted_driver_status_list
+}
+
+# Arguments
+#   $GITTED_CONFIG_RESET_MODE
+#
+gitted_driver_reset() {
+    nef_fatal "RESET action is not supported by the driver"
+}
+
+gitted_driver_commit() {
+    nef_fatal "COMMIT action is not supported by the driver"
+}
+
+gitted_driver_list() {
+    return 2 # by default, reports as non-dirMode
+}
