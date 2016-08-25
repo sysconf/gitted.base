@@ -1,3 +1,9 @@
-[base (commit racine) 4c2780b] initial commitcat
- 1 file changed, 8 insertions(+)
- create mode 100644 README.md
+# This is a Sysconf repository
+## Git subtrees
+
+git subtree push -P sysconf.base git@github.com:sysconf/sysconf.base.git master
+git subtree push -P sysconf.gitted git@github.com:sysconf/sysconf.gitted.git master
+
+git subtree pull -P sysconf.base git@github.com:sysconf/sysconf.base.git master
+git subtree pull -P sysconf.gitted git@github.com:sysconf/sysconf.gitted.git master
+
