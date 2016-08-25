@@ -1,6 +1,6 @@
 # This is a Sysconf repository
 
-This repository builds a basic Gitted system.
+This repository builds a basic [Gitted](http://gitted.io) system.
 You can build the machine or setup an existing one, for example:
 ```
 ./gitted-target init lxc:my-container
@@ -27,6 +27,8 @@ git subtree push -P sysconf.gitted git@github.com:sysconf/sysconf.gitted.git mas
 
 
 ## How this repository was built
+
+* See also: [Setup a new Gitted Sysconf repository](http://gitted.io/tutorial/setup-gitted-sysconf/)
 
 ```
 git init my-app
