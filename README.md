@@ -1,12 +1,27 @@
 # This is a Sysconf repository
 
 This repository builds a basic [Gitted](http://gitted.io) system.
-You can build the machine or setup an existing one, for example:
+
+Start by cloning it on your system:
+```
+git clone https://github.com/sysconf/gitted.base.git my-gitted-container
+cd my-gitted-container
+```
+
+Or, within an existing Git/gitted repository:
+```
+git fetch https://github.com/sysconf/gitted.base.git sysconf/master:other-sysconf-branch
+git checkout other-sysconf-branch
+```
+
+Then, you can build the machine or setup an existing one, for example:
+
 ```
 ./gitted-target init lxc:my-container
 ./gitted-target init dockerfile:../docker-definition/
 ./gitted-target init ssh:server.com
 ```
+
 
 
 ## Git subtrees
