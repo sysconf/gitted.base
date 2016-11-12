@@ -1,0 +1,287 @@
+#!/bin/bash
+
+if [ $# -eq 0 ]; then
+    set -- -h
+fi
+OPTS_SPEC="\
+git nef-subtree split (branches)
+git nef-subtree fetch (subtrees)
+git nef-subtree merge (subtrees)
+git nef-subtree join  (branches)
+git nef-subtree push  (subtrees)
+git nef-subtree sync  (all)
+--
+h,help        show the help
+q             quiet
+d             show debug messages
+"
+eval "$(echo "$OPTS_SPEC" | git rev-parse --parseopt -- "$@" || echo exit $?)"
+
+PATH=$PATH:$(git --exec-path)
+. git-sh-setup
+
+ensure_clean()
+{
+    if ! git diff-index HEAD --exit-code --quiet 2>&1; then
+	die "Working tree has modifications.  Cannot add."
+    fi
+    if ! git diff-index --cached HEAD --exit-code --quiet 2>&1; then
+	die "Index has modifications.  Cannot add."
+    fi
+}
+
+list_branches()
+{
+    local _dir=$GIT_DIR/${1-refs/heads/}
+    find $_dir -type f | sed s,^$_dir,,
+}
+
+list_subtrees()
+{
+    git show-ref \
+        | grep ' refs/sub/' \
+        | sed -r 's,[0-9a-z]+ refs/sub/([^/]+)/.*,\1,' \
+        | uniq
+}
+
+# usage: print_readme_sha1 <ref>
+print_branch_readme_sha1() {
+    git ls-tree "$_branch" \
+        | grep -E "[[:space:]]README" | awk '{print $3}'
+}
+print_subtree_remotes()
+{
+    foreach_branch print_branch_readme_sha1 \
+        | xargs -r -n 1 git cat-file -p \
+        | grep " -P $1 " \
+        | sed -r 's,git subtree [a-z]+ +-P *[^ ]+ (.*),\1,' \
+        | sort | uniq
+}
+
+require_work_tree
+ensure_clean
+
+quiet=
+debug=
+
+while [ $# -gt 0 ]; do
+    opt="$1"
+    shift
+    case "$opt" in
+	-q) quiet=1 ;;
+	-d) debug=1 ;;
+	--) break ;;
+	*) die "Unexpected option: $opt" ;;
+    esac
+done
+
+command="$1"
+shift
+
+ref_base=refs/sub
+
+foreach_branch()
+{
+    _branches=
+    while true; do
+        case "$1" in
+            --branches) _branches="$2"; shift 2 ;;
+            *) break ;;
+        esac
+    done
+
+    [ -z "$_branches" ] && _branches=$(list_branches)
+    branch_count=$(echo $_branches | wc -w)
+    n=0
+
+    for _branch in $_branches; do
+        n=$(( n+1 ))
+        "$@"
+    done
+}
+
+_each_branch_subtree()
+{
+    say ""
+    say "*** Processing branch [$n / $branch_count]: $_branch"
+    if [ "$(git symbolic-ref HEAD 2>/dev/null)" != "refs/heads/$_branch" ]; then
+        git checkout --quiet $_branch
+    fi
+    subtrees=$(cat README* \
+                      | grep -E "^git subtree (pull|push)" \
+                      | sed -r 's,git subtree [a-z]+ +-P *([^ ]+) .*,\1,' \
+                      | sort | uniq)
+
+    for subtree in $subtrees; do
+        subtree_ref_base=$ref_base/$subtree
+        subtree_merge_ref=$subtree_ref_base/_merge
+        subtree_ref=$subtree_ref_base/$_branch
+       "$@"
+    done
+}
+
+foreach_branch_subtree() {
+    _opts=()
+    while true; do
+        case "$1" in
+            --branches) _opts=("${_opts[@]}" --branches "$2"); shift 2 ;;
+            *) break ;;
+        esac
+    done
+
+    foreach_branch "${_opts[@]}" _each_branch_subtree "$@"
+}
+
+foreach_subtree() {
+    for subtree in $(list_subtrees); do
+        subtree_ref_base=$ref_base/$subtree
+        subtree_merge_ref=$subtree_ref_base/_merge
+        "$@"
+    done
+}
+
+################################################################################
+## SPLIT
+
+_cmd_split_one() {
+    local _commit=$(git subtree split -P $subtree)
+    say "  $(git rev-parse --short $_commit) $subtree_ref"
+    git-update-ref -m "nef-subtree split command" $subtree_ref $_commit
+}
+
+cmd_split() {
+    _opts=()
+    if [ $# -gt 0 ]; then
+        _opts=("${_opts[@]}" --branches "$*")
+    fi
+    foreach_branch_subtree "${_opts[@]}" _cmd_split_one
+}
+
+_cmd_join_one_branch_subtree()
+{
+    local _merging_ref=$subtree_ref_base/_merge
+
+    prev_head=$(git rev-parse HEAD)
+    say "Running: git subtree merge -P $subtree $_merging_ref"
+    git subtree merge -P $subtree $_merging_ref
+    if [ $? -ne 0 ]; then
+        die "merge conflict"
+    fi
+    if [ $prev_head != $(git rev-parse HEAD) ]; then
+        _commit=$(git subtree split -P $subtree)
+        say "  $(git rev-parse --short $_commit) $subtree_ref"
+        echo git-update-ref -m "nef-subtree merge: $_merging_ref" $subtree_ref $_commit
+    fi
+}
+
+# integrate the merge back into the branch (opposite of the 'split' command)
+cmd_join() {
+    foreach_branch_subtree _cmd_join_one_branch_subtree
+}
+
+################################################################################
+## FETCH / PUSH
+
+_each_subtree_remote() {
+    say "*** Subtree: $subtree" >&2
+
+    old_ifs="$IFS"
+    IFS=$'\n'
+    for _remote in $(print_subtree_remotes "$subtree"); do
+
+        IFS="$old_ifs"
+        local def=($_remote)
+        remote_url="${def[0]}"
+        remote_branch="${def[1]}"
+        local_branch=remote-$(echo "$_remote" | sha1sum | awk '{print $1}' | sed -r 's,^(.{8}).*,\1,')
+        local_ref=$subtree_ref_base/$local_branch
+
+        "$@"
+    done
+    IFS="$old_ifs"
+}
+foreach_subtree_remote() {
+    foreach_subtree _each_subtree_remote "$@"
+}
+
+# FETCH
+_cmd_fetch_one_subtree_remote() {
+    say "Fetch $remote_url for $remote_branch -> $local_ref"
+    git fetch "$remote_url" "$remote_branch:$local_ref"
+
+}
+cmd_fetch() {
+    foreach_subtree_remote _cmd_fetch_one_subtree_remote
+}
+# PUSH
+_cmd_push_one_subtree_remote() {
+    say "Push $remote_url for $local_ref -> $remote_branch"
+    git update-ref -m "nef-subtree merge" $local_ref $subtree_merge_ref \
+        || die "git-update-ref failed with status $? at updating: $subtree_merge_ref"
+    git push "$remote_url" "$local_ref:$remote_branch"
+}
+cmd_push() {
+    foreach_subtree_remote _cmd_push_one_subtree_remote
+}
+
+################################################################################
+## MERGE
+
+_cmd_merge_one_subtree()
+{
+    local _dir=$GIT_DIR/$subtree_ref_base
+    local _tomerge=$(find $_dir -type f | sed s,^$GIT_DIR/,, | grep -vE '^$_merge$')
+
+    if ! git show-ref $subtree_merge_ref >/dev/null; then
+        git update-ref -m "nef-subtree merge" $subtree_merge_ref "$(echo "$_tomerge" | head -n 1)"  \
+            || die "git-update-ref failed to update $subtree_merge_ref with status $?"
+    fi
+    say "Checking out: $subtree_merge_ref"
+    git checkout --quiet $subtree_merge_ref \
+        || die "git-checkout failed with status $?"
+
+    prev_head=$(git rev-parse HEAD)
+    for _merging_ref in $_tomerge; do
+
+        # say "  merging into $subtree_merge_ref: $_merging_ref"
+        git merge --no-edit $_merging_ref \
+            || die "git-merge failed with status $? at merging ref: $_merging_ref"
+        # die grr
+    done
+    head_commit=$(git rev-parse HEAD)
+    if [ $prev_head != $head_commit ]; then
+        echo git update-ref -m "nef-subtree merge" $subtree_merge_ref $head_commit
+        git update-ref -m "nef-subtree merge" $subtree_merge_ref $head_commit \
+            || die "git-update-ref failed with status $? at updating: $subtree_merge_ref"
+
+        say "subtree updated to $head_commit: $subtree [$subtree_merge_ref]"
+    else
+        say "subtree was not updated: $subtree"
+    fi
+
+    # for _merging_ref in $_tomerge; do
+    #     git update-ref -m "nef-subtree merge" $subtree_merge_ref "$(echo "$_tomerge" | head -n 1)"  \
+    #         || die "git-update-ref failed to update $subtree_merge_ref with status $?"
+    # done
+}
+
+cmd_merge()
+{
+    # perform merge between all sub-branches of each given subtree
+    foreach_subtree _cmd_merge_one_subtree
+}
+
+################################################################################
+## SYNC
+
+cmd_sync()
+{
+    cmd_split
+    cmd_fetch
+    cmd_merge
+    cmd_join
+    cmd_push
+}
+
+
+"cmd_$command" "$@"

@@ -131,13 +131,14 @@ gitted_driver_commit() {
 gitted_driver_reset() {
     driver_load_target
 
-    if [ $GITTED_CONFIG_RESET_COMMIT = $GITTED_NULL_SHA1 ]; then
-        [ $driver_target_state = missing ] \
-            && nef_fatal "Cannot remove missing target: $driver_target"
-        nef_fatal "Removing target is not supported (state = $driver_target_state): $driver_target"
-    fi
-
     if [ "$driver_target_branch" = sysconf/master ]; then
+
+        if [ $GITTED_CONFIG_RESET_COMMIT = $GITTED_NULL_SHA1 ]; then
+            [ $driver_target_state = missing ] \
+                && nef_fatal "Cannot remove missing target: $driver_target"
+            nef_fatal "Removing target is not supported (state = $driver_target_state): $driver_target"
+        fi
+
         local _need_init=no
         if [ $driver_target_state = missing ]; then
             _need_init=yes

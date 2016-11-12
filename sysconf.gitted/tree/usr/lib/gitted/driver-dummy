@@ -3,6 +3,9 @@
 
 . /usr/share/gitted/shell-driver || exit 2
 
+GITTED_DRIVER_SUPPORTS_RESET=no
+GITTED_DRIVER_SUPPORTS_COMMIT=yes
+
 gitted_driver_status_code() {
 
     return ${GITTED_CONFIG_DUMMY_STATUS:-1}

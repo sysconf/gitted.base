@@ -5,6 +5,9 @@ if [ -z "$GITTED_CONFIG_STATE_DRIVER" ]; then
     exit 1
 fi
 
+GITTED_DRIVER_SUPPORTS_RESET=no
+GITTED_DRIVER_SUPPORTS_COMMIT=no
+
 . /usr/share/nef-common/shell-command || exit 2
 
 # env | grep ^GITTED_; exit 1
@@ -117,13 +120,29 @@ gitted_driver_status_diff() {
 #   $GITTED_CONFIG_RESET_MODE
 #
 gitted_driver_reset() {
-    nef_fatal "RESET action is not supported by the driver"
+    if [ yes = $GITTED_DRIVER_SUPPORTS_RESET ]; then
+        nef_fatal "RESET action is not implemented by the driver"
+    else
+        nef_fatal "RESET action is not supported by the driver"
+    fi
 }
 
 gitted_driver_commit() {
-    nef_fatal "COMMIT action is not supported by the driver"
+    if [ yes = $GITTED_DRIVER_SUPPORTS_COMMIT ]; then
+        nef_fatal "COMMIT action is not implemented by the driver"
+    else
+        nef_fatal "COMMIT action is not supported by the driver"
+    fi
 }
 
 gitted_driver_list() {
+    [ yes = "$GITTED_CONFIG_DRIVER_LIST_ONLY_COMMITTABLE" \
+          -a yes != $GITTED_DRIVER_SUPPORTS_COMMIT ] \
+        && return 3
+
+    [ yes = "$GITTED_CONFIG_DRIVER_LIST_ONLY_RESETTABLE" \
+          -a yes != $GITTED_DRIVER_SUPPORTS_RESET ] \
+        && return 3
+
     return 2 # by default, reports as non-dirMode
 }

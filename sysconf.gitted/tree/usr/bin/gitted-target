@@ -33,7 +33,9 @@ if [ $? -ne 0 ]; then
     echo "      (symlinking works; sysconf being installed in /usr also works)" >&2
     exit 2
 fi
-sysconf_target_script=$(PATH=$script_dir:$script_dir/../../../../sysconf.base/tree/usr/bin:$PATH which sysconf-target)
+export PATH=$script_dir:$script_dir/../../../../sysconf.base/tree/usr/bin:$script_dir/../../../../sysconf.gitted/tree/usr/bin:$PATH
+sysconf_target_script=$(which sysconf-target)
+git_nef_subtree_path=$(which git-nef-subtree)
 
 ######################################################################
 # DEFAULTS
@@ -297,10 +299,17 @@ HINT: give --force to overwrite, specify --file or run the right $nef_command_na
             fi
         fi
     fi
-    nef_log "Copy '$_source_script' to $_script_dir ..."
-    cp $_cp_opts $_source_script $_script_dir/
-    cp $_cp_opts "$sysconf_target_script" $_script_dir
-    cp $_cp_opts "$lib_shell_command_path" $_script_dir
+    for _file in "$_source_script" \
+                     "$sysconf_target_script" \
+                     "$lib_shell_command_path" \
+                     "$git_nef_subtree_path" \
+                 ; do
+        nef_log "Copy '$_file' to: $_script_dir/"
+        cp $_cp_opts "$_file" "$_script_dir/"
+    done
+    # cp $_cp_opts "$sysconf_target_script" $_script_dir
+    # cp $_cp_opts "$lib_shell_command_path" $_script_dir
+    # cp $_cp_opts "$git_nef_subtree_path" $_script_dir
 
     # Setup Git config
     _git_config_cmd() {
@@ -329,11 +338,13 @@ HINT: give --force to overwrite, specify --file or run the right $nef_command_na
     fi
 }
 
-# command: sync <remote>
+# command: sync <remote> [<branch>]
 #
-# Synchronise all
+# Synchronise all, by doing:
+# (<target> is got from 'git config --get remote.<remote>.url')
 #
-# - gitted commit <target> '**'         (<target> is got from 'git config --get remote.<remote>.url')
+# - gitted status <target> '**'
+# - gitted commit <target> '**'
 # - git fetch <remote>
 # - foreach <branch> in <fetched branches>:
 #     - git checkout <branch>
@@ -348,9 +359,9 @@ HINT: give --force to overwrite, specify --file or run the right $nef_command_na
 #
 # Options:
 #
-#   --no-fetch          Skip "gitted commit" and git-fetch from target
-#   --no-push           Skip git-push to target
-#   --no-subtree        Skip processing subtrees
+#   -nf, --no-fetch     Skip "gitted commit" and git-fetch from target
+#   -np, --no-push      Skip git-push to target
+#   -ns, --no-subtree   Skip processing subtrees
 #
 script_command_sync() {
     local _no_fetch=no
@@ -360,9 +371,9 @@ script_command_sync() {
 
     while [ -n "$1" ]; do
         case "$1" in
-            --no-fetch) _no_fetch=yes; shift ;;
-            --no-push) _no_push=yes; shift ;;
-            --no-subtree) _no_subtree=yes; shift ;;
+            --no-fetch|-nf) _no_fetch=yes; shift ;;
+            --no-push|-np) _no_push=yes; shift ;;
+            --no-subtree|-ns) _no_subtree=yes; shift ;;
             -h|--help) script_command_help sync; return ;;
             -*) script_eval_common_option "$1"; shift ;;
             *) _argv=("${_argv[@]}" "$1"); shift ;;
@@ -370,25 +381,39 @@ script_command_sync() {
     done
 
     [ "${#_argv[@]}" -lt 1 ] && nef_fatal_usage_command sync "too few arguments"
-    [ "${#_argv[@]}" -gt 1 ] && nef_fatal_usage_command sync "too many arguments"
+    [ "${#_argv[@]}" -gt 2 ] && nef_fatal_usage_command sync "too many arguments"
 
 
     local _remote="${_argv[0]}"
+    local _branch="${_argv[1]}"
     local _target=$(script_git_remote_to_gitted_target "$_remote")
     nef_log "Working on remote \"$_remote\", target \"$_target\""
     [ -n "$_target" ] || nef_fatal "remote \"$_remote\" is missing or is not a gitted remote"
 
+    # local remote_branches=$(script_command_status "$_target" | sed ...)
+    # local remote_prefix=refs/remotes/$_remote
+    # local branches=$(git show-ref \
+    #                         | grep " $remote_prefix/" \
+    #                         | sed -r "s,[0-9a-z]+ $remote_prefix/(.*)$,\1,")
+
+    # nef_log -v "Branches: $branches"
+
     if [ no = $_no_fetch ]; then
-        (script_command_commit "$_target" '**') \
+        local _arg='**'
+        [ -n "$_branch" ] && _arg="$_branch"
+        (script_command_commit "$_target" "$_arg") \
             || nef_fatal "gitted-commit failed with status $?"
-        nef_log "Fetching all branches from remote: $_remote"
-        git fetch -v "$_remote" \
+        nef_log "Fetching branch '${_branch-(all)}' from remote: $_remote"
+        git fetch -v "$_remote" $_branch \
             || nef_fatal "git-fetch failed with status $?"
     fi
     local remote_prefix=refs/remotes/$_remote
-    local branches=$(git show-ref \
-                            | grep " $remote_prefix/" \
-                            | sed -r "s,[0-9a-z]+ $remote_prefix/(.*)$,\1,")
+    local branches=$_branch
+    if [ -z "$branches" ]; then
+        branches=$(git show-ref \
+                          | grep " $remote_prefix/" \
+                          | sed -r "s,[0-9a-z]+ $remote_prefix/(.*)$,\1,")
+    fi
 
     nef_log -v "Branches: $branches"
     for branch in $branches; do
