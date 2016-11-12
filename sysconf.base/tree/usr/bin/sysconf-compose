@@ -1,0 +1,37 @@
+#!/bin/bash
+#
+# SYSCONF-compose tool -- manage Sysconf repository
+#
+# Add -h or --help to any command for detailed information.
+#
+# Learn more about Sysconf at: http://gitted.net/sysconf/
+#
+# sysconf-git
+#
+# EXAMPLES
+#     sysconf-compose init
+#     sysconf-compose list-profiles
+#     sysconf-compose add-profile PROFILE
+#     sysconf-compose remove-profile PROFILE
+#     sysconf-compose remove-profile PROFILE
+#
+#     sysconf-compose 
+#
+##
+# HISTORY
+#   20150221 first version by JF Gigand <jf@geonef.fr>
+##
+
+nef_command_name=sysconf-target
+nef_command_prefix=script_command
+
+# Source 'shell-command' from sysconf.base, from any available location
+script_dir=$(dirname $(readlink -f $0))
+PATH=$script_dir:$script_dir/../share/nef-common:/usr/share/nef-common . shell-command
+if [ $? -ne 0 ]; then
+    echo "FATAL ERROR: could not find share/nef-common/shell-command" >&2
+    echo "HINT: keep sysconf-target within its sysconf.base tree" >&2
+    echo "      (symlinking works; sysconf being installed in /usr also works)" >&2
+    exit 2
+fi
+
