@@ -5,7 +5,6 @@
 # Must be runned from within a Git repository.
 # If no <branch> argument is given, all branches are managed.
 #
-# git-nef-subtree split [<branch>]:
 
 
 if [ $# -eq 0 ]; then
