@@ -34,7 +34,7 @@ SYSCONF_ETC_CONFIG_FOOTER=
 SYSCONF_ETC_CONFIG_SOURCE_CONF_D=
 # if empty, owner of target config file is not modified
 SYSCONF_ETC_CONFIG_OWNER=
-
+SYSCONF_ETC_CONFIG_FORCE=no
 SYSCONF_ETC_CONFIG_ONCHANGE_HOOK() {
     true
 }
@@ -178,8 +178,12 @@ script_update_config() {
 
     [ -f "$configpath" ] && {
 	if ! grep -q "$SYSCONF_ETC_CONFIG_GENERATED_TOKEN" "$configpath"; then
-            nef_log -v "$configpath does not seem to be an auto-generated file. Not updating."
-            return
+            if [ yes = "$SYSCONF_ETC_CONFIG_FORCE" ]; then
+                nef_log "Forcing overwrite of: $configpath"
+            else
+                nef_log "$configpath does not seem to be an auto-generated file. Not updating."
+                return
+            fi
         fi
     }
 

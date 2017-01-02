@@ -285,6 +285,13 @@ HINT: run 'git status' and 'git commit' to save changes, or pass
 
     driver_${current_driver}_create "$_custom"
 
+    # Manage /etc/sysconf/inherited
+    if [ -d /etc/sysconf/inherited ]; then
+        nef_log "Copy $(find /etc/sysconf/inherited -type f | wc -l) files from: /etc/sysconf/inherited"
+        tar c /etc/sysconf/inherited | driver_${current_driver}_exec --hybrid \
+                                              -c "tar x -C /"
+    fi
+
     # Copy SSH public key (--custom ssh-pubkey)
     if echo $_custom | grep -Eq "(^|,)ssh-pubkey($|,)"; then
         if [ -f ~/.ssh/id_dsa.pub ]; then
@@ -299,7 +306,7 @@ HINT: run 'git status' and 'git commit' to save changes, or pass
         local _git_user_name=$(git config --get user.name)
         local _git_user_email=$(git config --get user.email)
         if [ -n "$_git_user_name" -a -n "$_git_user_name" ]; then
-            nef_log "set target Git username to '$_git_user_name' and email to '$_git_user_email'"
+            nef_log "Set target Git username to '$_git_user_name' and email to '$_git_user_email'"
             cat <<EOF | driver_${current_driver}_exec --hybrid \
                 -c "cat >>${current_prefix}/root/.gitconfig"
 [user]
@@ -964,6 +971,15 @@ driver_lxc_create() {
 
         driver_lxc_refresh_state
 
+        # # Fix hostname
+        # container_hostname=$(grep -E "^lxc.utsname *=" $_configpath | sed -r 's/^[^=]+ *= *//')
+        # if ! [[ "$container_hostname" =~ \. ]]; then
+        #     new_hostname="$container_hostname.$(hostname)"
+        #     sed -i -r 's/^(lxc.utsname *= *).*/\1'$new_hostname'/' $_configpath \
+        #         && nef_log "Fixed container hostname to: $new_hostname"
+        # fi
+
+        # Fix IP address
         if [ $(id -u) -ne 0 ]; then
             # fix hwaddr to avoid redundant 00:16:3e:ff:ff:ff (leading to IP conflict)
             local a=$((RANDOM % 256))
@@ -991,6 +1007,12 @@ driver_lxc_create() {
                 || nef_fatal "Could not fix container config for lxc:confined: $_configpath"
         fi
     fi
+    local _container_hostname=$driver_lxc_container_name.$(hostname)
+    nef_log "Fixing container hostname to: $_container_hostname"
+    (driver_lxc_exec --hybrid -c "echo $_container_hostname >/etc/hostname")
+    lxc-stop -n $driver_lxc_container_name -t 30 \
+        && nef_log "Stopped container: $driver_lxc_container_name"
+
 }
 
 driver_lxc_exec() {
