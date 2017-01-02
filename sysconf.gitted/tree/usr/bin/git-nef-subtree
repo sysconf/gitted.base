@@ -1,15 +1,38 @@
 #!/bin/bash
+#
+# git-nef-subtree - Automatize management of multiple Git subtrees
+#
+# Must be runned from within a Git repository.
+# If no <branch> argument is given, all branches are managed.
+#
+
 
 if [ $# -eq 0 ]; then
     set -- -h
 fi
 OPTS_SPEC="\
-git nef-subtree split (branches)
+git nef-subtree clean
+git nef-subtree split [<branch1>] ...
+        Split all subtrees form branches and save them to .git/refs/sub/
+
 git nef-subtree fetch (subtrees)
+        Fetch all subtree into .git/refs/sub/ from upstreams
+        as defined in each subtree's README[.md]
+
 git nef-subtree merge (subtrees)
-git nef-subtree join  (branches)
+        For each SUBTREE, merge .git/refs/sub/SUBTREE/*
+                          into: .git/refs/sub/SUBTREE/merge
+
+git nef-subtree join  [<branch1>] ...
+        For each SUBTREE, subtree-merge: .git/refs/sub/SUBTREE/merge
+        as subtree into branches' tree.
+
 git nef-subtree push  (subtrees)
-git nef-subtree sync  (all)
+        Push all subtree from .git/refs/sub/ to upstreams
+        as defined in each subtree's README[.md]
+
+git nef-subtree sync  [<branch1>] ...
+        Perform: split, fetch, merge, join, push
 --
 h,help        show the help
 q             quiet
@@ -51,7 +74,15 @@ print_branch_readme_sha1() {
 }
 print_subtree_remotes()
 {
-    foreach_branch print_branch_readme_sha1 \
+    _opts=()
+    while true; do
+        case "$1" in
+            --branches) _opts=("${_opts[@]}" --branches "$2"); shift 2 ;;
+            *) break ;;
+        esac
+    done
+
+    foreach_branch "${_opts[@]}" print_branch_readme_sha1 \
         | xargs -r -n 1 git cat-file -p \
         | grep " -P $1 " \
         | sed -r 's,git subtree [a-z]+ +-P *[^ ]+ (.*),\1,' \
@@ -136,15 +167,28 @@ foreach_subtree() {
     for subtree in $(list_subtrees); do
         subtree_ref_base=$ref_base/$subtree
         subtree_merge_ref=$subtree_ref_base/_merge
+        say "** FOR SUBTREE $subtree DO: $*"
         "$@"
     done
+}
+
+################################################################################
+## CLEAN
+
+cmd_clean() {
+    if [ -d .git/refs/sub ]; then
+        say "Removing: .git/refs/sub/"
+        rm -rf .git/refs/sub/
+    else
+        say "Clean already."
+    fi
 }
 
 ################################################################################
 ## SPLIT
 
 _cmd_split_one() {
-    local _commit=$(git subtree split -P $subtree)
+    local _commit=$(git subtree split -P $subtree --rejoin)
     say "  $(git rev-parse --short $_commit) $subtree_ref"
     git-update-ref -m "nef-subtree split command" $subtree_ref $_commit
 }
@@ -155,20 +199,26 @@ cmd_split() {
         _opts=("${_opts[@]}" --branches "$*")
     fi
     foreach_branch_subtree "${_opts[@]}" _cmd_split_one
+    # foreach_branch_subtree _cmd_split_one "$@"
 }
+
+################################################################################
+## JOIN
 
 _cmd_join_one_branch_subtree()
 {
     local _merging_ref=$subtree_ref_base/_merge
 
     prev_head=$(git rev-parse HEAD)
-    say "Running: git subtree merge -P $subtree $_merging_ref"
-    git subtree merge -P $subtree $_merging_ref
+    # say "Running: git subtree merge -P $subtree $_merging_ref"
+    # git subtree merge -P $subtree $_merging_ref
+    git merge -Xsubtree="$subtree" -Xtheirs -m "Merge commit '$_merging_ref' into $_branch as subtree '$subtree' (by git-nef-subtree)" $_merging_ref
+
     if [ $? -ne 0 ]; then
         die "merge conflict"
     fi
     if [ $prev_head != $(git rev-parse HEAD) ]; then
-        _commit=$(git subtree split -P $subtree)
+        _commit=$(git subtree split -P $subtree --rejoin)
         say "  $(git rev-parse --short $_commit) $subtree_ref"
         echo git-update-ref -m "nef-subtree merge: $_merging_ref" $subtree_ref $_commit
     fi
@@ -176,18 +226,31 @@ _cmd_join_one_branch_subtree()
 
 # integrate the merge back into the branch (opposite of the 'split' command)
 cmd_join() {
-    foreach_branch_subtree _cmd_join_one_branch_subtree
+    _opts=()
+    if [ $# -gt 0 ]; then
+        _opts=("${_opts[@]}" --branches "$*")
+    fi
+    foreach_branch_subtree "${_opts[@]}" _cmd_join_one_branch_subtree "$@"
 }
 
 ################################################################################
 ## FETCH / PUSH
 
 _each_subtree_remote() {
-    say "*** Subtree: $subtree" >&2
+    _opts=()
+    while true; do
+        case "$1" in
+            --branches) _opts=("${_opts[@]}" --branches "$2"); shift 2 ;;
+            *) break ;;
+        esac
+    done
+
+    say ""
+    say "*** Subtree: $subtree [${_opts[*]}]" >&2
 
     old_ifs="$IFS"
     IFS=$'\n'
-    for _remote in $(print_subtree_remotes "$subtree"); do
+    for _remote in $(print_subtree_remotes "${_opts[@]}" "$subtree"); do
 
         IFS="$old_ifs"
         local def=($_remote)
@@ -196,12 +259,21 @@ _each_subtree_remote() {
         local_branch=remote-$(echo "$_remote" | sha1sum | awk '{print $1}' | sed -r 's,^(.{8}).*,\1,')
         local_ref=$subtree_ref_base/$local_branch
 
+        say "** FOR REMOTE $_remote OF SUBTREE $subtree DO: $*"
         "$@"
     done
     IFS="$old_ifs"
 }
 foreach_subtree_remote() {
-    foreach_subtree _each_subtree_remote "$@"
+    _opts=()
+    while true; do
+        case "$1" in
+            --branches) _opts=("${_opts[@]}" --branches "$2"); shift 2 ;;
+            *) break ;;
+        esac
+    done
+
+    foreach_subtree _each_subtree_remote "${_opts[@]}" "$@"
 }
 
 # FETCH
@@ -211,7 +283,12 @@ _cmd_fetch_one_subtree_remote() {
 
 }
 cmd_fetch() {
-    foreach_subtree_remote _cmd_fetch_one_subtree_remote
+    _opts=()
+    if [ $# -gt 0 ]; then
+        _opts=("${_opts[@]}" --branches "$*")
+    fi
+
+    foreach_subtree_remote "${_opts[@]}" _cmd_fetch_one_subtree_remote
 }
 # PUSH
 _cmd_push_one_subtree_remote() {
@@ -221,7 +298,12 @@ _cmd_push_one_subtree_remote() {
     git push "$remote_url" "$local_ref:$remote_branch"
 }
 cmd_push() {
-    foreach_subtree_remote _cmd_push_one_subtree_remote
+    _opts=()
+    if [ $# -gt 0 ]; then
+        _opts=("${_opts[@]}" --branches "$*")
+    fi
+
+    foreach_subtree_remote "${_opts[@]}" _cmd_push_one_subtree_remote
 }
 
 ################################################################################
@@ -244,7 +326,7 @@ _cmd_merge_one_subtree()
     for _merging_ref in $_tomerge; do
 
         # say "  merging into $subtree_merge_ref: $_merging_ref"
-        git merge --no-edit $_merging_ref \
+        git merge -m "Merge commit '$_merging_ref' into $subtree_merge_ref for subtree '$subtree' (by git-nef-subtree)" $_merging_ref \
             || die "git-merge failed with status $? at merging ref: $_merging_ref"
         # die grr
     done
@@ -268,7 +350,7 @@ _cmd_merge_one_subtree()
 cmd_merge()
 {
     # perform merge between all sub-branches of each given subtree
-    foreach_subtree _cmd_merge_one_subtree
+    foreach_subtree _cmd_merge_one_subtree "$@"
 }
 
 ################################################################################
@@ -276,11 +358,15 @@ cmd_merge()
 
 cmd_sync()
 {
-    cmd_split
-    cmd_fetch
-    cmd_merge
-    cmd_join
-    cmd_push
+    if [ -d "$ref_base" ]; then
+        say "Removing dir: $ref_base"
+        rm -rf $ref_base
+    fi
+    cmd_split "$@"
+    cmd_fetch "$@"
+    cmd_merge "$@"
+    cmd_join "$@"
+    cmd_push "$@"
 }
 
 

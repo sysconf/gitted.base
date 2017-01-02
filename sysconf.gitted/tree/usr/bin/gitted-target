@@ -383,7 +383,6 @@ script_command_sync() {
     [ "${#_argv[@]}" -lt 1 ] && nef_fatal_usage_command sync "too few arguments"
     [ "${#_argv[@]}" -gt 2 ] && nef_fatal_usage_command sync "too many arguments"
 
-
     local _remote="${_argv[0]}"
     local _branch="${_argv[1]}"
     local _target=$(script_git_remote_to_gitted_target "$_remote")
@@ -415,9 +414,10 @@ script_command_sync() {
                           | sed -r "s,[0-9a-z]+ $remote_prefix/(.*)$,\1,")
     fi
 
-    nef_log -v "Branches: $branches"
+    nef_log "*** Syncing branches: $branches"
+    git nef-subtree clean
     for branch in $branches; do
-        nef_log "** branch: $branch"
+        nef_log "** Checking out + splitting branch: $branch"
         git checkout --quiet $branch
         git merge $remote_prefix/$branch \
             || nef_fatal "merge conflict :("
@@ -428,13 +428,13 @@ script_command_sync() {
     done
 
     if [ no = $_no_subtree ]; then
-        git nef-subtree fetch \
+        git nef-subtree fetch $branches \
             || nef_fatal "subtree-fetch failed with status $?"
-        git nef-subtree merge \
+        git nef-subtree merge $branches \
             || nef_fatal "subtree-merge failed with status $?"
-        git nef-subtree join \
+        git nef-subtree join $branches \
             || nef_fatal "subtree-join failed with status $?"
-        git nef-subtree push \
+        git nef-subtree push $branches \
             || nef_fatal "subtree-push failed with status $?"
     fi
 
@@ -710,6 +710,7 @@ script_parse_cmdline() {
         script_git_dir=$PWD/$script_git_dir
     }
     [ -z "$script_git_dir" ] && nef_fatal "not in GIT directory or working tree"
+    PATH=$script_git_dir:$PATH
 
     # Run command
     script_command_name="${script_command_argv[0]}"
