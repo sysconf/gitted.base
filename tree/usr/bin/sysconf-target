@@ -930,7 +930,7 @@ driver_lxc_status() {
     [ $nef_opt_show_verbose = yes ] && lxc-info -n $driver_lxc_container_name
 }
 driver_lxc_list() {
-    lxc-ls -g onboot
+    lxc-ls -g "${SYSCONF_TARGET_LXC_GROUP:-onboot}"
 }
 driver_lxc_create() {
     local _custom="$1"
