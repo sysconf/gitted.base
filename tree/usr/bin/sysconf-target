@@ -146,6 +146,10 @@ SYSCONF_TARGET_DEFAULT_DISTRIB=debian:wheezy
 #   --lxc-create-opts '<options>'       Pass <options> as arguments to lxc-create
 #
 #        Example:  --lxc-create-opts "-B lvm --vgname vgname1 --fssize 4G"
+#
+#   --lxc-create-template-opts '<options>'       Pass <options> as arguments to lxc-create's template
+#
+#        Example:  --lxc-create-template-opts --no-validate
 ##
 script_command_init() {
     local _argv=()
@@ -177,6 +181,7 @@ script_command_init() {
             --distrib) script_init_distrib="$2"; shift 2 ;;
             --custom) _custom="$_custom $2"; _default_custom=; shift 2 ;;
             --lxc-create-opts) shift; driver_lxc_create_opts="$1"; shift ;;
+            --lxc-create-template-opts) shift; driver_lxc_create_template_opts="$1"; shift ;;
             --backing-store)
                 local _ifs="$IFS"; IFS=:
                 local _tmp=($2); IFS="$_ifs"
@@ -184,7 +189,7 @@ script_command_init() {
                 driver_lxc_create_opts="$driver_lxc_create_opts -B ${_tmp[0]}"
                 [ "${_tmp[0]}" = lvm -a -n "${_tmp[1]}" ] && \
                     driver_lxc_create_opts="$driver_lxc_create_opts --vgname ${_tmp[1]}"
-                echo ----driver_lxc_create_opts:$driver_lxc_create_opts
+                # echo ----driver_lxc_create_opts:$driver_lxc_create_opts
                 shift 2 ;;
             --fssize) driver_lxc_create_opts="$driver_lxc_create_opts --fssize $2"; shift 2 ;;
             --) shift; _argv=("${_argv[@]}" "$@"); shift $# ;;
@@ -294,11 +299,13 @@ HINT: run 'git status' and 'git commit' to save changes, or pass
 
     # Copy SSH public key (--custom ssh-pubkey)
     if echo $_custom | grep -Eq "(^|,)ssh-pubkey($|,)"; then
-        if [ -f ~/.ssh/id_dsa.pub ]; then
-            nef_log "copy ~/.ssh/id_dsa.pub to ${current_target}:/root/.ssh/authorized_keys"
-            cat ~/.ssh/id_dsa.pub | driver_${current_driver}_exec --hybrid \
-                -c "mkdir -p ${current_prefix}/root/.ssh && cat >>${current_prefix}/root/.ssh/authorized_keys"
-        fi
+        for key in id_rsa id_dsa id_ecdsa id_ed25519; do
+            if [ -f ~/.ssh/$key.pub ]; then
+                nef_log "copy ~/.ssh/$key.pub to ${current_target}:/root/.ssh/authorized_keys"
+                cat ~/.ssh/$key.pub | driver_${current_driver}_exec --hybrid \
+                                               -c "mkdir -p ${current_prefix}/root/.ssh && cat >>${current_prefix}/root/.ssh/authorized_keys"
+            fi
+        done
     fi
 
     # Set GIT config for user.name and user.email (--custom git-user)
@@ -865,6 +872,7 @@ driver_ssh_exec() {
 #     With lxc-attach(1), run COMMAND inside the LXC container CONTAINER.
 ##
 driver_lxc_create_opts=
+driver_lxc_create_template_opts=
 
 driver_lxc_load() {
     driver_lxc_check_env
@@ -960,12 +968,10 @@ driver_lxc_create() {
         fi
 
         nef_log "Creating LXC container '$driver_lxc_container_name' with distrib '$distrib', release '$release'..."
-        if [ -n "$driver_lxc_create_opts" ]; then
-            nef_log -v "lxc-create extra options: $driver_lxc_create_opts"
-        fi
+        nef_log -v "Running: lxc-create -n $driver_lxc_container_name $driver_lxc_create_opts -t download -- -d $distrib -r $release -a $arch $driver_lxc_create_template_opts"
 
         lxc-create -n $driver_lxc_container_name $driver_lxc_create_opts \
-            -t download -- -d $distrib -r $release -a $arch \
+            -t download -- -d $distrib -r $release -a $arch $driver_lxc_create_template_opts \
             2>&1 | nef_log_pipe "lxc-create:" \
             || nef_fatal "lxc-create failed with status $?"
 

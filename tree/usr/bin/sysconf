@@ -180,7 +180,7 @@ compile_conf_rec()
     if [ -d $config/tree ]; then
 	nef_log "Merging tree: $confpath/$config/tree/"
 	local_cp -srn $confpath/$config/tree/* $confpath/compiled/ \
-            2>&1 | grep -v "cannot create symbolic link" >&2
+                 2>&1 | grep -v "cannot create symbolic link" >&2
         # else
 	# nef_log "Ignoring tree-less conf: $config"
     fi
@@ -290,13 +290,13 @@ add_file()
 
     dir=$(dirname "$target")
     mkdir -p "$dir" && mv "$file" "$target" && ln -s "$target" "$file" && {
-	ls -l "$file"
-        nef_log
-        nef_log "Undo command:"
-        nef_log "  mv $target $file"
-    } || {
-	nef_log "warning: error moving '$file' to '$target' and replacing with symlink"
-    }
+	    ls -l "$file"
+            nef_log
+            nef_log "Undo command:"
+            nef_log "  mv $target $file"
+        } || {
+	    nef_log "warning: error moving '$file' to '$target' and replacing with symlink"
+        }
 }
 
 # function usage: run_cmd CONFIG COMMAND [arg1 [... argn]]
@@ -369,12 +369,15 @@ sysconf_fix_directory()
         [ -n "$_ownership" ] && chown "$_ownership" "$_dir"
     fi
 }
+# usage: sysconf_fix_user USERNAME
 sysconf_fix_user()
 {
     local _name="$1"
     shift
 
-    grep -q ^$_name: /etc/passwd || {
+    if grep -q ^$_name: /etc/passwd; then
+        return 1
+    else
         echo "Creating missing user: $_name"
         useradd "$@" $_name
         local _home="~$_name"
@@ -382,7 +385,7 @@ sysconf_fix_user()
         chmod 750 $_home/.ssh
         cp "~root/.ssh/authorized_keys" $_home/.ssh/
         chown -R $_name:$_name $_home
-    }
+    fi
 }
 sysconf_fix_group()
 {
