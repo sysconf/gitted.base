@@ -350,8 +350,9 @@ sysconf_require_packages()
             || apt-get update
 
         # sysconf_apt-get install --yes --no-upgrade $_packages
+        # obsolete option: --force-yes
         sysconf_apt-get install \
-                        --yes --force-yes -o Dpkg::Options::=--force-confdef \
+                        --yes --allow-unauthenticated -o Dpkg::Options::=--force-confdef \
                         --no-upgrade --no-install-recommends \
                         $_packages
     fi
