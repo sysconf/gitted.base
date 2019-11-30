@@ -138,7 +138,7 @@ SYSCONF_TARGET_DEFAULT_DISTRIB=debian:wheezy
 #                       variables of the sysconf-target environment.
 #
 #        "lxc:unconfined"   Enable container to create nested containers,
-#                       by adding "lxc.aa_profile = unconfined" to the container
+#                       by adding "lxc.apparmor.profile = unconfined" to the container
 #                       configuration. This is only supported by the LXC driver.
 #                       Warning: this will make container processes able to escape
 #                       escape the isolation; check: lxc.container.conf(5).
@@ -1003,12 +1003,14 @@ driver_lxc_create() {
         nef_log "Container exists already, not creating: $driver_lxc_container_name"
     fi
     # Apply lxc:unconfined custom option (--custom ssh-pubkey from the "init" command)
+
+    # before "lxc.apparmor.profile" the option was: lxc.aa_profile
     if echo $_custom | grep -Eq "(^|,)lxc:unconfined($|,)"; then
-        if grep -qE "^ *lxc.aa_profile *= *unconfined *(#.*)?" $_configpath; then
+        if grep -qE "^ *lxc.apparmor.profile *= *unconfined *(#.*)?" $_configpath; then
             nef_log -v "Not fixing container config for lxc:confined (already set): $_configpath"
         else
             nef_log -v "Fixing container config for lxc:confined: $_configpath"
-            echo -e "\n# Added by $nef_command_name (option --custom lxc:unconfined)\nlxc.aa_profile = unconfined" \
+            echo -e "\n# Added by $nef_command_name (option --custom lxc:unconfined)\nlxc.apparmor.profile = unconfined" \
                 >>$_configpath \
                 || nef_fatal "Could not fix container config for lxc:confined: $_configpath"
         fi
