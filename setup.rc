@@ -3,13 +3,6 @@
 # Previously sourced: ../sysconf.base/tree/usr/share/nef-common/shell-command
 
 
-# Fix /etc/host with our hostname
-# (and avoid Apache's "apr_sockaddr_info_get() failed" error)
-hostname=$(hostname)
-ip=$(ip -o -4 addr show dev eth0 primary  | sed -r 's/.* inet ([0-9.]+).*/\1/')
-grep -qE "\s${hostname}($|\s)" /etc/hosts \
-    || echo "$ip $hostname" >>/etc/hosts
-
 # because the sources.list installed by lxc download template doesn't work well
 # _old_content="$(cat /etc/apt/sources.list)"
 if grep -q debian /etc/apt/sources.list; then
