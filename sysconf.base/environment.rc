@@ -1,0 +1,4 @@
+# Variables for setting the behaviour of sysconf "sysconf.base"        -*- shell-script -*-
+
+# If yes, /etc/hosts will be updated after /etc/hosts.d/* (by sysconf-etc.d)
+SYSCONF_FORCE_ETC_HOSTS_UPDATE=no
