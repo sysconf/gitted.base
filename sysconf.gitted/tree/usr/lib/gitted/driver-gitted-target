@@ -64,12 +64,11 @@ gitted_driver_list() {
 
         # nef_log "name = $_name ; target = $_target"
         local _state=$(sysconf-target status --state "$_target" | cut -d' ' -f2)
-        if [ $_state != missing ]; then
-            # echo "$_name"
-            # else
+        # if [ $_state != missing ]; then
+        if [ $_state = running ]; then
+            # TODO: new state 'unavailable' ?
             gitted-target status $_target  --branches | grep -v ^# | sed "s/^../$_name\//"
         fi
-        #| cut -d' ' -f1
     done
 }
 
